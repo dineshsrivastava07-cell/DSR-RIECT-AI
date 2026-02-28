@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DSR|RIECT — Retail Intelligence Execution Control Tower</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+</head>
+<body>
+
+<!-- ═══ HEADER ══════════════════════════════════════════════════════════════ -->
+<header class="app-header">
+  <div class="header-left">
+    <button class="btn-history-toggle" id="history-toggle" title="Chat History">☰</button>
+    <div class="header-brand">
+      <span class="brand-dsr">DSR</span><span class="brand-sep">|</span><span class="brand-riect">RIECT</span>
+      <span class="brand-tagline">Retail Intelligence Execution Control Tower</span>
+    </div>
+  </div>
+  <div class="header-controls">
+    <select id="period-select" class="ctrl-select">
+      <option value="today">Today</option>
+      <option value="week" selected>This Week</option>
+      <option value="month">This Month</option>
+      <option value="quarter">This Quarter</option>
+    </select>
+    <select id="role-select" class="ctrl-select">
+      <option value="HQ" selected>HQ</option>
+      <option value="Regional">Regional</option>
+      <option value="Store">Store Manager</option>
+      <option value="Vendor">Vendor</option>
+    </select>
+    <button class="btn-icon" id="alert-bell" title="Alerts">
+      🔔 <span class="alert-badge" id="alert-count" style="display:none">0</span>
+    </button>
+    <button class="btn-icon" id="settings-btn" title="Settings">⚙</button>
+    <button class="btn-icon btn-new-chat" id="new-chat-btn" title="New Chat">＋</button>
+  </div>
+</header>
+
+<!-- ═══ MAIN LAYOUT ══════════════════════════════════════════════════════════ -->
+<main class="app-layout">
+
+  <!-- ── HISTORY PANE ────────────────────────────────────────────────── -->
+  <aside class="history-pane" id="history-pane">
+    <div class="history-header">
+      <span>Chat History</span>
+      <button class="btn-small-icon" id="new-chat-hist" title="New Chat">＋ New</button>
+    </div>
+    <div class="history-list" id="history-list">
+      <div class="hist-empty">No sessions yet</div>
+    </div>
+  </aside>
+
+  <!-- ── LEFT PANE: Control Tower ────────────────────────────────────── -->
+  <aside class="left-pane">
+    <section class="ct-section">
+      <div class="ct-section-title">RIECT KPIs</div>
+      <div class="kpi-grid">
+        <div class="kpi-card" id="kpi-spsf">
+          <div class="kpi-label">SPSF</div>
+          <div class="kpi-value" id="kpi-spsf-val">—</div>
+          <div class="kpi-sub" id="kpi-spsf-sub">Sales / SqFt</div>
+          <div class="kpi-sub2" id="kpi-spsf-sub2"></div>
+          <div class="kpi-bar"><div class="kpi-bar-fill" id="kpi-spsf-bar"></div></div>
+        </div>
+        <div class="kpi-card" id="kpi-sellthru">
+          <div class="kpi-label">Sell-Thru %</div>
+          <div class="kpi-value" id="kpi-sellthru-val">—</div>
+          <div class="kpi-sub" id="kpi-sellthru-sub">Category avg</div>
+          <div class="kpi-sub2" id="kpi-sellthru-sub2"></div>
+          <div class="kpi-bar"><div class="kpi-bar-fill" id="kpi-sellthru-bar"></div></div>
+        </div>
+        <div class="kpi-card" id="kpi-doi">
+          <div class="kpi-label">DOI</div>
+          <div class="kpi-value" id="kpi-doi-val">—</div>
+          <div class="kpi-sub">Days of Inv</div>
+          <div class="kpi-bar"><div class="kpi-bar-fill" id="kpi-doi-bar"></div></div>
+        </div>
+        <div class="kpi-card" id="kpi-mbq">
+          <div class="kpi-label">MBQ</div>
+          <div class="kpi-value" id="kpi-mbq-val">—</div>
+          <div class="kpi-sub">Compliance</div>
+          <div class="kpi-bar"><div class="kpi-bar-fill" id="kpi-mbq-bar"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="ct-section">
+      <div class="ct-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+        Exception Inbox
+        <button id="btn-scan-alerts" class="btn-scan" title="Run live KPI scan from ClickHouse">Scan</button>
+      </div>
+      <div class="exception-filters">
+        <button class="exc-filter active" data-priority="all">All</button>
+        <button class="exc-filter p1" data-priority="P1">P1</button>
+        <button class="exc-filter p2" data-priority="P2">P2</button>
+        <button class="exc-filter p3" data-priority="P3">P3</button>
+      </div>
+      <div class="exception-list" id="exception-list">
+        <div class="exc-empty">No active exceptions</div>
+      </div>
+    </section>
+
+    <section class="ct-section">
+      <div class="ct-section-title">Store Health</div>
+      <div class="store-health-grid" id="store-health-grid">
+        <div class="health-empty">Run a store query to populate</div>
+      </div>
+    </section>
+  </aside>
+
+  <!-- ── RIGHT PANE: Chat ─────────────────────────────────────────────── -->
+  <section class="right-pane">
+    <div class="chat-container" id="chat-container">
+      <div class="chat-welcome" id="chat-welcome">
+        <div class="welcome-logo">DSR|RIECT</div>
+        <div class="welcome-text">Retail Intelligence at your command</div>
+        <div class="welcome-suggestions">
+          <button class="suggestion-chip" onclick="sendSuggestion(this)">Show top 10 stores by SPSF</button>
+          <button class="suggestion-chip" onclick="sendSuggestion(this)">Sell-through by category this week</button>
+          <button class="suggestion-chip" onclick="sendSuggestion(this)">Stores with DOI above 60 days</button>
+          <button class="suggestion-chip" onclick="sendSuggestion(this)">Peak hours customer footfall</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="chat-input-area">
+      <div class="input-row">
+        <select id="llm-selector" class="llm-select" title="LLM Model">
+          <option value="auto">⚡ Auto</option>
+        </select>
+        <input type="text" id="chat-input" class="chat-input"
+          placeholder="Ask anything about your retail data..." autocomplete="off" />
+        <button class="btn-send" id="send-btn" onclick="sendMessage()">▶</button>
+      </div>
+      <div class="status-bar" id="status-bar">
+        <span class="status-dot" id="ws-dot"></span>
+        <span id="status-text">Connecting...</span>
+        <span class="model-badge" id="model-badge"></span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ═══ SETTINGS PANEL ═══════════════════════════════════════════════════════ -->
+<div class="settings-overlay" id="settings-overlay" onclick="closeSettings()"></div>
+<div class="settings-panel" id="settings-panel">
+  <div class="settings-header">
+    <span>⚙ Settings</span>
+    <button class="settings-close" onclick="closeSettings()">✕</button>
+  </div>
+  <div class="settings-body">
+
+    <!-- ClickHouse -->
+    <div class="settings-section">
+      <div class="settings-section-title">
+        ClickHouse Data Connection
+        <span id="ch-configured-badge" class="ch-badge" style="display:none">✓ Configured</span>
+      </div>
+      <p class="settings-note">Optional — connects your live retail data. Without it, the AI answers general questions using knowledge only.</p>
+      <div class="form-group">
+        <label>Host</label>
+        <input type="text" id="ch-host" placeholder="hostname or http://... URL" onblur="onChHostChange()" />
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Port</label>
+          <input type="number" id="ch-port" value="8443" />
+        </div>
+        <div class="form-group" style="justify-content:center;display:flex;align-items:flex-end;padding-bottom:2px">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox" id="ch-secure" checked /> Secure (HTTPS)
+          </label>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Username</label>
+        <input type="text" id="ch-user" placeholder="username" />
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="ch-pass" placeholder="••••••••" />
+      </div>
+      <div class="form-group">
+        <label>Schemas</label>
+        <input type="text" id="ch-schemas" value="vmart_sales,customers,data_science" />
+      </div>
+      <div class="form-actions">
+        <button class="btn-secondary" onclick="testClickHouse()">Test Connection</button>
+        <button class="btn-primary" onclick="saveClickHouse()">Save</button>
+        <button class="btn-danger" id="ch-clear-btn" onclick="clearClickHouse()" style="display:none">Clear</button>
+      </div>
+      <div class="conn-status" id="ch-status"></div>
+    </div>
+
+    <!-- LLM: Ollama -->
+    <div class="settings-section">
+      <div class="settings-section-title">Local LLM (Ollama)</div>
+      <div class="ollama-status" id="ollama-status">
+        <span class="status-dot" id="ollama-dot"></span>
+        <span id="ollama-text">Checking...</span>
+      </div>
+      <div class="form-group" style="margin-top:10px">
+        <label>Active Model</label>
+        <select id="default-llm" onchange="saveDefaultLLM()">
+          <option value="auto">Auto (best available)</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- LLM: Cloud Accounts -->
+    <div class="settings-section">
+      <div class="settings-section-title">Cloud LLM — Account Login</div>
+      <p class="settings-note">Login with your existing account on each provider's site. No separate API keys required.</p>
+
+      <!-- Qwen — Email + Password direct login -->
+      <div class="provider-card provider-card--featured" id="card-qwen">
+        <div class="provider-header">
+          <div class="provider-info">
+            <span class="provider-icon provider-icon--qwen">✦</span>
+            <div>
+              <div class="provider-name">Qwen <span class="provider-default-badge">Default</span></div>
+              <div class="provider-sub">Alibaba · Qwen3.5-Plus · Qwen3.5 Flash · Qwen3-Max</div>
+            </div>
+          </div>
+          <div class="provider-actions" id="qwen-actions">
+            <button class="btn-connect" onclick="toggleQwenForm()">Connect Account</button>
+          </div>
+        </div>
+        <div class="provider-connect-form" id="qwen-form" style="display:none">
+          <div class="qwen-login-fields">
+
+            <!-- Single connect button -->
+            <button class="btn-save-key" id="qwen-connect-btn"
+                    onclick="qwenConnect()" style="width:100%;font-size:12px;padding:10px">
+              ✦ Sign in with Qwen &amp; Connect
+            </button>
+
+            <!-- Instructions shown after click -->
+            <div id="qwen-instructions" style="display:none">
+              <div class="qwen-instr-row">
+                <span class="qwen-instr-num">1</span>
+                <span>Sign in with Google on the Qwen tab that just opened</span>
+              </div>
+              <div class="qwen-instr-row" style="margin-top:8px">
+                <span class="qwen-instr-num">2</span>
+                <span>Drag this button to your <strong>Bookmarks Bar</strong>:<br>
+                  <span class="qwen-bookmarklet-wrap" style="margin-top:6px">
+                    <a id="qwen-bookmarklet" href="#" class="qwen-bookmarklet-btn"
+                       title="Drag me to your Bookmarks Bar">
+                      ✦ Connect Qwen to RIECT
+                    </a>
+                    <span style="font-size:10px;color:var(--text-3)">← drag to bookmarks bar</span>
+                  </span>
+                </span>
+              </div>
+              <div class="qwen-instr-row" style="margin-top:8px">
+                <span class="qwen-instr-num">3</span>
+                <span>On the Qwen tab, click <strong>Connect Qwen to RIECT</strong> bookmark — this page connects automatically ✓</span>
+              </div>
+            </div>
+
+            <div class="account-auth-title" style="margin-top:8px">Model</div>
+            <select id="qwen-model-select" class="ctrl-select" style="width:100%" onchange="qwenSetModel(this.value)">
+              <option value="qwen3.5-plus" selected>Qwen3.5-Plus (Default)</option>
+              <option value="qwen3.5-flash">Qwen3.5 Flash</option>
+              <option value="qwen3-max">Qwen3-Max</option>
+            </select>
+          </div>
+          <div class="provider-status-msg" id="qwen-status"></div>
+        </div>
+      </div>
+
+      <!-- Claude -->
+      <div class="provider-card" id="card-claude">
+        <div class="provider-header">
+          <div class="provider-info">
+            <span class="provider-icon">✦</span>
+            <div>
+              <div class="provider-name">Claude</div>
+              <div class="provider-sub">Anthropic · claude-sonnet-4-6</div>
+            </div>
+          </div>
+          <div class="provider-actions" id="claude-actions">
+            <button class="btn-connect" onclick="connectAccount('claude')">Connect Account</button>
+          </div>
+        </div>
+        <div class="provider-connect-form" id="claude-form" style="display:none">
+          <div class="account-auth-flow">
+            <div class="account-auth-title">Step 1 — Login to your Anthropic account</div>
+            <button class="btn-open-account" onclick="openAndWait('claude')">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              Login to Anthropic Console
+            </button>
+            <div class="account-auth-title" style="margin-top:10px">Step 2 — Authorise DSR|RIECT</div>
+            <div class="account-auth-hint">In the console: <strong>Settings → API Keys → Create Key</strong> → Copy the key shown</div>
+            <div class="account-auth-title" style="margin-top:10px">Step 3 — Paste your account token</div>
+            <div class="account-token-row">
+              <input type="password" id="claude-key-input" placeholder="Paste token copied from Anthropic Console" class="key-input" autocomplete="off" />
+              <button class="btn-save-key" onclick="saveAccountKey('claude')">Connect</button>
+            </div>
+          </div>
+          <div class="provider-status-msg" id="claude-status"></div>
+        </div>
+      </div>
+
+      <!-- Gemini — Google Sign-In via AI Studio (no GCP setup needed) -->
+      <div class="provider-card" id="card-gemini">
+        <div class="provider-header">
+          <div class="provider-info">
+            <span class="provider-icon">◈</span>
+            <div>
+              <div class="provider-name">Gemini</div>
+              <div class="provider-sub">Google · gemini-1.5-pro</div>
+            </div>
+          </div>
+          <div class="provider-actions" id="gemini-actions">
+            <button class="btn-connect" onclick="connectAccount('gemini')">Connect Account</button>
+          </div>
+        </div>
+        <div class="provider-connect-form" id="gemini-form" style="display:none">
+          <div class="account-auth-flow">
+            <div class="account-auth-title">Step 1 — Sign in with your Google account</div>
+            <button class="btn-google-signin" onclick="openAndWait('gemini')">
+              <svg width="16" height="16" viewBox="0 0 48 48" style="flex-shrink:0">
+                <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.35-8.16 2.35-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+              </svg>
+              Sign in with Google (AI Studio)
+            </button>
+            <div class="account-auth-title" style="margin-top:10px">Step 2 — Get your account token</div>
+            <div class="account-auth-hint">On the AI Studio page: click <strong>Get API key → Create API key</strong> → Copy it</div>
+            <div class="account-auth-title" style="margin-top:10px">Step 3 — Paste your account token</div>
+            <div class="account-token-row">
+              <input type="password" id="gemini-key-input" placeholder="Paste token copied from Google AI Studio" class="key-input" autocomplete="off" />
+              <button class="btn-save-key" onclick="saveAccountKey('gemini')">Connect</button>
+            </div>
+          </div>
+          <div class="provider-status-msg" id="gemini-status"></div>
+        </div>
+      </div>
+
+      <!-- OpenAI -->
+      <div class="provider-card" id="card-openai">
+        <div class="provider-header">
+          <div class="provider-info">
+            <span class="provider-icon">◉</span>
+            <div>
+              <div class="provider-name">ChatGPT</div>
+              <div class="provider-sub">OpenAI · GPT-4o</div>
+            </div>
+          </div>
+          <div class="provider-actions" id="openai-actions">
+            <button class="btn-connect" onclick="connectAccount('openai')">Connect Account</button>
+          </div>
+        </div>
+        <div class="provider-connect-form" id="openai-form" style="display:none">
+          <div class="account-auth-flow">
+            <div class="account-auth-title">Step 1 — Login to your OpenAI account</div>
+            <button class="btn-open-account" onclick="openAndWait('openai')">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              Login to OpenAI Platform
+            </button>
+            <div class="account-auth-title" style="margin-top:10px">Step 2 — Authorise DSR|RIECT</div>
+            <div class="account-auth-hint">On the platform: <strong>API Keys → Create new secret key</strong> → Copy the key shown</div>
+            <div class="account-auth-title" style="margin-top:10px">Step 3 — Paste your account token</div>
+            <div class="account-token-row">
+              <input type="password" id="openai-key-input" placeholder="Paste token copied from OpenAI Platform" class="key-input" autocomplete="off" />
+              <button class="btn-save-key" onclick="saveAccountKey('openai')">Connect</button>
+            </div>
+          </div>
+          <div class="provider-status-msg" id="openai-status"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Role -->
+    <div class="settings-section">
+      <div class="settings-section-title">Role View</div>
+      <div class="role-options">
+        <label><input type="radio" name="role-setting" value="HQ" checked /> HQ</label>
+        <label><input type="radio" name="role-setting" value="Regional" /> Regional</label>
+        <label><input type="radio" name="role-setting" value="Store" /> Store Manager</label>
+        <label><input type="radio" name="role-setting" value="Vendor" /> Vendor</label>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ═══ TEMPLATES ═══════════════════════════════════════════════════════════ -->
+<template id="tpl-user-msg">
+  <div class="chat-msg user-msg">
+    <div class="msg-bubble user-bubble"></div>
+  </div>
+</template>
+
+<template id="tpl-assistant-msg">
+  <div class="chat-msg assistant-msg">
+    <div class="msg-header">
+      <span class="msg-avatar">RIECT</span>
+      <span class="msg-model-label"></span>
+      <span class="msg-intent-label"></span>
+    </div>
+
+    <!-- Response Header: Key Finding -->
+    <div class="response-header">
+      <div class="response-narrative"></div>
+    </div>
+
+    <!-- 3-Tab Response Block -->
+    <div class="response-tabs" style="display:none">
+      <div class="tab-nav">
+        <button class="tab-btn active" data-tab="table">Data Table</button>
+        <button class="tab-btn" data-tab="chart">Chart View</button>
+        <button class="tab-btn" data-tab="sql">SQL Query</button>
+      </div>
+      <div class="tab-panels">
+        <!-- Table Panel -->
+        <div class="tab-panel active" data-panel="table">
+          <div class="table-toolbar">
+            <span class="row-count-badge"></span>
+            <input type="text" class="table-filter-input" placeholder="Filter rows..." />
+            <select class="col-filter-select" title="Filter by column"></select>
+            <button class="btn-export-csv">Export CSV</button>
+          </div>
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <!-- Chart Panel -->
+        <div class="tab-panel" data-panel="chart">
+          <div class="chart-controls">
+            <select class="chart-type-select">
+              <option value="bar">Bar Chart</option>
+              <option value="line">Line Chart</option>
+              <option value="pie">Pie Chart</option>
+              <option value="doughnut">Doughnut</option>
+            </select>
+            <span class="chart-desc"></span>
+          </div>
+          <div class="chart-wrapper">
+            <canvas class="chart-canvas"></canvas>
+          </div>
+        </div>
+        <!-- SQL Panel -->
+        <div class="tab-panel" data-panel="sql">
+          <div class="sql-toolbar">
+            <span class="sql-meta"></span>
+            <button class="btn-copy-sql">Copy SQL</button>
+          </div>
+          <pre class="sql-code"></pre>
+          <div class="sql-tables-info"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Alert Strip -->
+    <div class="alert-strip"></div>
+  </div>
+</template>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
