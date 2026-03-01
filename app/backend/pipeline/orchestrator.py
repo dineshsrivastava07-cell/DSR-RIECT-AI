@@ -656,6 +656,9 @@ class PipelineOrchestrator:
         )
 
         # ─── STAGE: llm_stream ─────────────────────────────────────────
+        # max_tokens: 16000 to accommodate 9-section response (~13K tokens needed)
+        # for full Top 10 tables across stores, dept, articles, peak hours, MRP.
+        _MAX_TOKENS = 16000
         narrative_parts = []
         if "llm_stream" in decision.stages:
             await ws_send({"type": "stage", "stage": "llm_stream"})
@@ -663,7 +666,7 @@ class PipelineOrchestrator:
                 async for chunk in router.stream(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
-                    max_tokens=8000,
+                    max_tokens=_MAX_TOKENS,
                     temperature=0.3,  # Lower = more factual, consistent retail analytics
                 ):
                     narrative_parts.append(chunk)
@@ -671,13 +674,52 @@ class PipelineOrchestrator:
             except Exception as e:
                 logger.error(f"LLM stream failed: {e}")
                 try:
-                    text = await router.generate(system_prompt, user_prompt, max_tokens=8000)
+                    text = await router.generate(system_prompt, user_prompt, max_tokens=_MAX_TOKENS)
                     narrative_parts = [text]
                     await ws_send({"type": "token", "content": text})
                 except Exception as e2:
                     fallback = self._fallback_narrative(query, decision, query_result, kpi_results)
                     narrative_parts = [fallback]
                     await ws_send({"type": "token", "content": fallback})
+
+        # ─── Auto-continuation if response was truncated ────────────────
+        # A complete response always contains Section 9 / EXECUTIVE CONCLUSION.
+        # If missing, the LLM hit its token limit mid-table — auto-continue.
+        _COMPLETION_MARKERS = [
+            "SECTION 9", "EXECUTIVE CONCLUSION", "30-DAY OUTLOOK",
+            "TOP 10 WINS", "CHAIN HEALTH SNAPSHOT",
+        ]
+        _ANALYTICAL_ROUTES = (Route.KPI_ANALYSIS, Route.DATA_QUERY, Route.TREND_ANALYSIS)
+        _full_so_far = "".join(narrative_parts)
+        _needs_continuation = (
+            decision.route in _ANALYTICAL_ROUTES
+            and not any(m in _full_so_far for m in _COMPLETION_MARKERS)
+            and len(_full_so_far) > 500   # has meaningful content, just truncated
+        )
+        if _needs_continuation:
+            logger.info("Response truncated — issuing auto-continuation")
+            await ws_send({"type": "stage", "stage": "llm_continue"})
+            _tail = _full_so_far[-1000:]  # last 1000 chars for context
+            _continuation_prompt = (
+                "CONTINUATION — The analytical response was cut off due to length. "
+                "Continue EXACTLY from where it stopped. "
+                "Do NOT repeat, re-summarise, or add any preamble. "
+                "Continue directly with the remaining sections:\n\n"
+                f"...{_tail}"
+            )
+            try:
+                _cont = await router.generate(
+                    system_prompt=system_prompt,
+                    user_prompt=_continuation_prompt,
+                    max_tokens=12000,
+                    temperature=0.3,
+                )
+                if _cont:
+                    narrative_parts.append(_cont)
+                    await ws_send({"type": "token", "content": _cont})
+                    logger.info(f"Continuation added: {len(_cont)} chars")
+            except Exception as _e_cont:
+                logger.warning(f"Auto-continuation failed: {_e_cont}")
 
         narrative = "".join(narrative_parts)
 

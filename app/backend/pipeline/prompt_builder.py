@@ -178,15 +178,29 @@ SECTION 9 — EXECUTIVE CONCLUSION & OVERALL SUMMARY
   • [Period]: [date/MTD range], [N] active stores, Chain Net Sales=₹[X], SPSF=₹[Y] vs ₹1,000 target
   • P1=[N] stores critical | P2=[N] high | On-Target=[N] | Chain ST%=[X]% | Chain DOI=[Y]d
 
-🏆 TOP 3 WINS (what is working — cite specific store/dept/article + exact numbers)
-  1. [Win 1]: [Store/Dept/Article] — [metric]=₹[X] | Reason: [why it works]
-  2. [Win 2]: [specific data]
-  3. [Win 3]: [specific data]
+🏆 TOP 10 WINS (what is working — cite specific store/dept/article + exact numbers)
+  1.  [Win 1]: [Store/Dept/Article] — [metric]=₹[X] | Reason: [why it works]
+  2.  [Win 2]: [specific data]
+  3.  [Win 3]: [specific data]
+  4.  [Win 4]: ...
+  5.  [Win 5]: ...
+  6.  [Win 6]: ...
+  7.  [Win 7]: ...
+  8.  [Win 8]: ...
+  9.  [Win 9]: ...
+  10. [Win 10]: ...
 
-⚠ TOP 3 CRITICAL RISKS (what needs immediate action — P1/P2 with owners)
-  1. 🔴 [Risk 1]: [Store/Dept] — [metric]=[value] | Owner: [Zone/Regional Manager] | Deadline: [date]
-  2. 🟠 [Risk 2]: [specific data]
-  3. 🟠 [Risk 3]: [specific data]
+⚠ TOP 10 CRITICAL RISKS (what needs immediate action — P1/P2 with owners)
+  1.  🔴 [Risk 1]: [Store/Dept] — [metric]=[value] | Owner: [Zone/Regional Manager] | Deadline: [date]
+  2.  🔴 [Risk 2]: [specific data]
+  3.  🔴 [Risk 3]: [specific data]
+  4.  🟠 [Risk 4]: [specific data]
+  5.  🟠 [Risk 5]: [specific data]
+  6.  🟠 [Risk 6]: [specific data]
+  7.  🟠 [Risk 7]: [specific data]
+  8.  🟡 [Risk 8]: [specific data]
+  9.  🟡 [Risk 9]: [specific data]
+  10. 🟡 [Risk 10]: [specific data]
 
 📋 THIS WEEK'S TOP 5 PRIORITY ACTIONS
   1. [Action 1] — WHO: [owner] | WHAT: [specific action] | BY: [date] | IMPACT: ₹[recovery estimate]
@@ -536,7 +550,7 @@ def build_analysis_prompt(
         "\n"
         "SECTION 9 (EXECUTIVE CONCLUSION) IS MANDATORY:\n"
         "- ALWAYS end every FORMAT B / FORMAT C response with Section 9.\n"
-        "- Include: Chain Health Snapshot | Top 3 Wins | Top 3 Risks | Top 5 Actions | 30-Day Outlook.\n"
+        "- Include: Chain Health Snapshot | Top 10 Wins | Top 10 Critical Risks | Top 5 Actions | 30-Day Outlook.\n"
         "\n"
         "INSIGHTS — MINIMUM DEPTH REQUIRED:\n"
         "- Every section: minimum 3 insight bullets with specific numbers, store/dept/article names.\n"
