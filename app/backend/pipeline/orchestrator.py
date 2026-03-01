@@ -663,6 +663,7 @@ class PipelineOrchestrator:
         #   - Local Ollama 7B → ~180s max (acceptable given streaming starts immediately)
         _MAX_TOKENS = 6000
         narrative_parts = []
+        _tokens_sent = 0  # Track sent tokens — if stream fails mid-way, skip full generate fallback
         if "llm_stream" in decision.stages:
             await ws_send({"type": "stage", "stage": "llm_stream"})
             try:
@@ -673,17 +674,24 @@ class PipelineOrchestrator:
                     temperature=0.3,  # Lower = more factual, consistent retail analytics
                 ):
                     narrative_parts.append(chunk)
+                    _tokens_sent += 1
                     await ws_send({"type": "token", "content": chunk})
             except Exception as e:
-                logger.error(f"LLM stream failed: {e}")
-                try:
-                    text = await router.generate(system_prompt, user_prompt, max_tokens=_MAX_TOKENS)
-                    narrative_parts = [text]
-                    await ws_send({"type": "token", "content": text})
-                except Exception as e2:
-                    fallback = self._fallback_narrative(query, decision, query_result, kpi_results)
-                    narrative_parts = [fallback]
-                    await ws_send({"type": "token", "content": fallback})
+                logger.error(f"LLM stream failed after {_tokens_sent} tokens: {e}")
+                if _tokens_sent > 30:
+                    # Partial response already sent — do NOT send a full generate() response
+                    # (would cause section duplication in the UI)
+                    logger.warning("Partial stream sent — skipping generate fallback to avoid duplication")
+                else:
+                    # No meaningful content sent yet — fall back to full generate
+                    try:
+                        text = await router.generate(system_prompt, user_prompt, max_tokens=_MAX_TOKENS)
+                        narrative_parts = [text]
+                        await ws_send({"type": "token", "content": text})
+                    except Exception as e2:
+                        fallback = self._fallback_narrative(query, decision, query_result, kpi_results)
+                        narrative_parts = [fallback]
+                        await ws_send({"type": "token", "content": fallback})
 
         narrative = "".join(narrative_parts)
 
@@ -1199,19 +1207,35 @@ class PipelineOrchestrator:
         except Exception:
             days_elapsed = 1
 
-        STORE_F   = "STORE_ID NOT IN (SELECT CODE FROM `vmart_sales`.`stores` WHERE CLOSING_DATE IS NOT NULL)"
-        STORE_F_P = "p.STORE_ID NOT IN (SELECT CODE FROM `vmart_sales`.`stores` WHERE CLOSING_DATE IS NOT NULL)"
-        # INV_SUB: SOH is Int32 in inventory_current — use ifNull to handle NULLs from LEFT JOIN
+        # Active store filter: STORE_ID = stores.CODE (confirmed join key)
+        STORE_F   = "STORE_ID NOT IN (SELECT CODE FROM `vmart_sales`.`stores` WHERE CLOSING_DATE IS NOT NULL AND CLOSING_DATE != '')"
+        STORE_F_P = "p.STORE_ID NOT IN (SELECT CODE FROM `vmart_sales`.`stores` WHERE CLOSING_DATE IS NOT NULL AND CLOSING_DATE != '')"
+        # INV_SUB: SOH is Int32 — ifNull ensures unmatched LEFT JOIN rows yield 0, not NULL
         INV_SUB   = "(SELECT ICODE, SUM(ifNull(SOH, 0)) AS SOH FROM `vmart_product`.`inventory_current` GROUP BY ICODE)"
+        # Trading divisions only — exclude non-trading items from KPI analytics
+        # Note: keep NON TRADING in total sales queries (store_inventory, last_30_days)
+        TRADING_F = (
+            "p.DIVISION NOT IN ('NON TRADING','NON-TRADING','NON TRADE','OTHERS','OTHER',"
+            "'STAFF WELFARE','STAFF UNIFORM','ASSETS','ASSETS & CONSUMABLES','CONSUMABLES')"
+        )
 
         from clickhouse.query_runner import run_query
 
-        # Build all 7 SQL strings upfront
-        # store_inventory: ORDER BY mtd_qty DESC LIMIT 500 — ensures ALL active stores included
-        # (was: ORDER BY sell_thru_pct ASC LIMIT 100 → missed high-ST% stores like top performers)
+        # ── store_inventory: SHRTNAME, ZONE, REGION come from pos_transactional_data (NOT stores)
+        # stores table has STORE_NAME not SHRTNAME. Fetching SHRTNAME from stores caused
+        # ClickHouse "unknown identifier" error → query returned {} → no STORE INVENTORY BLOCK.
+        # Fix: include SHRTNAME/ZONE/REGION in the mtd CTE from pos_transactional_data.
+        # Join key: STORE_ID (pos) = STORE_CODE (inventory) = CODE (stores) — confirmed.
         sql_store_inventory = f"""
             WITH mtd AS (
-                SELECT STORE_ID, ICODE, SUM(QTY) AS mtd_qty
+                SELECT
+                    STORE_ID,
+                    anyLast(SHRTNAME) AS store_name,
+                    anyLast(ZONE)     AS zone,
+                    anyLast(REGION)   AS region,
+                    ICODE,
+                    SUM(QTY)          AS mtd_qty,
+                    SUM(NETAMT)       AS mtd_sales
                 FROM `vmart_sales`.`pos_transactional_data`
                 WHERE toDate(BILLDATE) >= toStartOfMonth(toDate('{date}'))
                   AND toDate(BILLDATE) <= toDate('{date}')
@@ -1221,40 +1245,41 @@ class PipelineOrchestrator:
             )
             SELECT
                 ms.STORE_ID,
-                anyLast(st.SHRTNAME)  AS store_name,
-                anyLast(st.ZONE)      AS zone,
-                anyLast(st.REGION)    AS region,
-                SUM(ms.mtd_qty)       AS mtd_qty,
-                SUM(ifNull(inv.SOH, 0)) AS total_soh,
-                round(SUM(ms.mtd_qty) / nullIf(SUM(ms.mtd_qty) + SUM(ifNull(inv.SOH, 0)), 0) * 100, 1)
-                    AS sell_thru_pct,
-                round(SUM(ifNull(inv.SOH, 0)) / nullIf(SUM(ms.mtd_qty) / {days_elapsed}, 0), 0)
-                    AS doi
+                anyLast(ms.store_name)    AS store_name,
+                anyLast(ms.zone)          AS zone,
+                anyLast(ms.region)        AS region,
+                SUM(ms.mtd_qty)           AS mtd_qty,
+                SUM(ms.mtd_sales)         AS net_sales,
+                SUM(ifNull(inv.SOH, 0))   AS total_soh,
+                round(
+                    SUM(ms.mtd_qty) / nullIf(SUM(ms.mtd_qty) + SUM(ifNull(inv.SOH, 0)), 0) * 100,
+                1) AS sell_thru_pct,
+                round(
+                    SUM(ifNull(inv.SOH, 0)) / nullIf(SUM(ms.mtd_qty) / {days_elapsed}, 0),
+                0) AS doi
             FROM mtd ms
             LEFT JOIN `vmart_product`.`inventory_current` inv
                 ON ms.STORE_ID = inv.STORE_CODE AND ms.ICODE = inv.ICODE
-            LEFT JOIN `vmart_sales`.`stores` st ON ms.STORE_ID = st.CODE
-            WHERE st.CLOSING_DATE IS NULL
             GROUP BY ms.STORE_ID
             HAVING SUM(ms.mtd_qty) > 0
-            ORDER BY mtd_qty DESC
+            ORDER BY net_sales DESC
             LIMIT 500
         """
 
         sql_dept = f"""
             SELECT
                 p.DIVISION, p.SECTION, p.DEPARTMENT,
-                SUM(p.NETAMT)                AS net_sales_amount,
-                SUM(p.QTY)                   AS total_qty,
-                COUNT(DISTINCT p.BILLNO)     AS bill_count,
-                SUM(p.GROSSAMT)              AS total_gross,
-                SUM(p.DISCOUNTAMT)           AS total_discount,
+                SUM(p.NETAMT)                 AS net_sales_amount,
+                SUM(p.QTY)                    AS total_qty,
+                COUNT(DISTINCT p.BILLNO)      AS bill_count,
+                SUM(p.GROSSAMT)               AS total_gross,
+                SUM(p.DISCOUNTAMT)            AS total_discount,
                 round(SUM(p.DISCOUNTAMT) / nullIf(SUM(p.GROSSAMT), 0) * 100, 1) AS discount_pct,
                 COUNT(DISTINCT p.ARTICLECODE) AS article_count,
-                SUM(toFloat64OrZero(inv.SOH)) AS total_soh,
-                round(SUM(p.QTY) / nullIf(SUM(p.QTY) + SUM(toFloat64OrZero(inv.SOH)), 0) * 100, 1)
+                SUM(ifNull(inv.SOH, 0))       AS total_soh,
+                round(SUM(p.QTY) / nullIf(SUM(p.QTY) + SUM(ifNull(inv.SOH, 0)), 0) * 100, 1)
                     AS sell_thru_pct,
-                round(SUM(toFloat64OrZero(inv.SOH)) / nullIf(SUM(p.QTY) / {days_elapsed}, 0), 0)
+                round(SUM(ifNull(inv.SOH, 0)) / nullIf(SUM(p.QTY) / {days_elapsed}, 0), 0)
                     AS doi
             FROM `vmart_sales`.`pos_transactional_data` p
             LEFT JOIN {INV_SUB} inv ON p.ICODE = inv.ICODE
@@ -1262,6 +1287,7 @@ class PipelineOrchestrator:
               AND toDate(p.BILLDATE) <= toDate('{date}')
               AND p.QTY > 0
               AND {STORE_F_P}
+              AND {TRADING_F}
             GROUP BY p.DIVISION, p.SECTION, p.DEPARTMENT
             ORDER BY net_sales_amount DESC
             LIMIT 25
@@ -1277,10 +1303,10 @@ class PipelineOrchestrator:
                 SUM(p.QTY)                  AS total_qty,
                 COUNT(DISTINCT p.BILLNO)    AS bill_count,
                 round(SUM(p.MRPAMT) / nullIf(SUM(p.QTY), 0), 0) AS avg_mrp,
-                SUM(toFloat64OrZero(inv.SOH)) AS total_soh,
-                round(SUM(p.QTY) / nullIf(SUM(p.QTY) + SUM(toFloat64OrZero(inv.SOH)), 0) * 100, 1)
+                SUM(ifNull(inv.SOH, 0))     AS total_soh,
+                round(SUM(p.QTY) / nullIf(SUM(p.QTY) + SUM(ifNull(inv.SOH, 0)), 0) * 100, 1)
                     AS sell_thru_pct,
-                round(SUM(toFloat64OrZero(inv.SOH)) / nullIf(SUM(p.QTY) / {days_elapsed}, 0), 0)
+                round(SUM(ifNull(inv.SOH, 0)) / nullIf(SUM(p.QTY) / {days_elapsed}, 0), 0)
                     AS doi
             FROM `vmart_sales`.`pos_transactional_data` p
             LEFT JOIN {INV_SUB} inv ON p.ICODE = inv.ICODE
@@ -1288,6 +1314,7 @@ class PipelineOrchestrator:
               AND toDate(p.BILLDATE) <= toDate('{date}')
               AND p.QTY > 0
               AND {STORE_F_P}
+              AND {TRADING_F}
             GROUP BY p.ICODE, p.ARTICLENAME, p.DIVISION, p.SECTION, p.DEPARTMENT
             ORDER BY net_sales_amount DESC
             LIMIT 25
@@ -1303,10 +1330,10 @@ class PipelineOrchestrator:
                 SUM(p.QTY)                  AS total_qty,
                 COUNT(DISTINCT p.BILLNO)    AS bill_count,
                 round(SUM(p.MRPAMT) / nullIf(SUM(p.QTY), 0), 0) AS avg_mrp,
-                SUM(toFloat64OrZero(inv.SOH)) AS total_soh,
-                round(SUM(p.QTY) / nullIf(SUM(p.QTY) + SUM(toFloat64OrZero(inv.SOH)), 0) * 100, 1)
+                SUM(ifNull(inv.SOH, 0))     AS total_soh,
+                round(SUM(p.QTY) / nullIf(SUM(p.QTY) + SUM(ifNull(inv.SOH, 0)), 0) * 100, 1)
                     AS sell_thru_pct,
-                round(SUM(toFloat64OrZero(inv.SOH)) / nullIf(SUM(p.QTY) / {days_elapsed}, 0), 0)
+                round(SUM(ifNull(inv.SOH, 0)) / nullIf(SUM(p.QTY) / {days_elapsed}, 0), 0)
                     AS doi
             FROM `vmart_sales`.`pos_transactional_data` p
             LEFT JOIN {INV_SUB} inv ON p.ICODE = inv.ICODE
@@ -1314,6 +1341,7 @@ class PipelineOrchestrator:
               AND toDate(p.BILLDATE) <= toDate('{date}')
               AND p.QTY > 0
               AND {STORE_F_P}
+              AND {TRADING_F}
             GROUP BY p.ICODE, p.ARTICLENAME, p.DIVISION, p.SECTION, p.DEPARTMENT
             ORDER BY net_sales_amount ASC
             LIMIT 25
@@ -1359,10 +1387,10 @@ class PipelineOrchestrator:
                    SUM(p.NETAMT)               AS net_sales_amount,
                    SUM(p.QTY)                  AS total_qty,
                    COUNT(DISTINCT p.BILLNO)    AS bill_count,
-                   SUM(toFloat64OrZero(inv.SOH)) AS total_soh,
-                   round(SUM(p.QTY) / nullIf(SUM(p.QTY) + SUM(toFloat64OrZero(inv.SOH)), 0) * 100, 1)
+                   SUM(ifNull(inv.SOH, 0))     AS total_soh,
+                   round(SUM(p.QTY) / nullIf(SUM(p.QTY) + SUM(ifNull(inv.SOH, 0)), 0) * 100, 1)
                        AS sell_thru_pct,
-                   round(SUM(toFloat64OrZero(inv.SOH)) / nullIf(SUM(p.QTY) / {days_elapsed}, 0), 0)
+                   round(SUM(ifNull(inv.SOH, 0)) / nullIf(SUM(p.QTY) / {days_elapsed}, 0), 0)
                        AS doi
             FROM `vmart_sales`.`pos_transactional_data` p
             LEFT JOIN (
@@ -1376,6 +1404,7 @@ class PipelineOrchestrator:
               AND toDate(p.BILLDATE) <= toDate('{date}')
               AND p.QTY > 0
               AND {STORE_F_P}
+              AND {TRADING_F}
             GROUP BY p.ICODE, p.ARTICLENAME, p.DIVISION, p.SECTION, p.DEPARTMENT
             ORDER BY unit_mrp DESC
             LIMIT 7

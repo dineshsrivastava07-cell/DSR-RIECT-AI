@@ -71,6 +71,11 @@ SECTION 3 — STORE PERFORMANCE (always show BOTH tables, minimum 10 stores each
    "[Store] — SPSF=₹[Val] | ST%=[X]% | DOI=[Y]d | Gap=₹[Z] | Action: [WHO] must [WHAT] by [WHEN]"
 
 SECTION 4 — DEPARTMENT & ARTICLE ANALYSIS (ALWAYS include — data is in SUPPLEMENTARY DATA block)
+NOTE: Department/Article data excludes NON TRADING, OTHERS, ASSETS, STAFF WELFARE — these are
+non-merchandise categories excluded from KPI analytics. They ARE included in store-level Total Sales.
+Valid trading divisions: Men's, Ladies/Women, Kids (Boys/Girls/Infant), Kirana/FMCG
+  (Food/Non-Food/Staples), Home Mart, Footwear, Non-Apparel departments.
+If you see a division not in this list, include it but note it for review.
 
 COLUMN MAPPINGS for dept/article data blocks (use these — they exist in the data):
   net_sales_amount → Net Sales (₹)   | total_qty → Qty   | bill_count → Bills
@@ -114,17 +119,51 @@ SECTION 5 — TOP 7 HIGHEST SELLING MRP (ALWAYS include — data is in SUPPLEMEN
 → ST% = sell_thru_pct column | DOI = doi column | SOH = total_soh column — all pre-computed
 → Per-article insight for all 7: "[Article] MRP=₹[X], Qty=[Y], ST%=[Z]%, DOI=[D]d | [Premium/velocity/reorder note]"
 
-SECTION 6 — ANOMALIES (only genuine issues — NOT top performers)
-Use ANOMALY DETECTION OUTPUT. For each anomaly show:
-| Risk | Store/Article | KPI | Value | vs Avg | z-score | Gap to Target | Type | Root Cause | Action |
-🔴 = P1 critical (z≥3) | 🟠 = P2 high (z≥2) | 🔵 = discount anomaly | ⚠ = pilferage/returns
+SECTION 6 — ANOMALIES & KPI IMPROVEMENT GUIDANCE (ALWAYS output this section — NEVER skip)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART A — STATISTICAL ANOMALIES (from ANOMALY DETECTION OUTPUT):
+Use ANOMALY DETECTION OUTPUT block. For each anomaly show:
+| Risk | Store/Article | KPI | Value | Chain Avg | z-score | Gap to Target | Root Cause | Action |
+🔴 P1 critical (z≥3) | 🟠 P2 high (z≥2) | 🔵 discount anomaly | ⚠ pilferage/returns
 Rules:
 - NEVER list top performers (positive z-score on SPSF/UPT/Sales) as anomalies
 - Only flag underperformers (negative z) for SPSF/UPT/Sales, excess stock (positive z) for DOI
-- For each anomaly: state the specific KPI value, average, gap, and a concrete recommended action
-- Pilferage/fraud: include leakage amount + "Escalate to [zone/regional manager] immediately"
-- Discount fraud: include exact unauthorized rate, amount, and audit instruction
-- If no anomalies: "✅ No anomalies detected for this dataset."
+- For each anomaly: state specific KPI value, chain avg, gap, z-score, and concrete action
+- Pilferage/fraud: include leakage ₹ amount + "ESCALATE to Zone Manager + Loss Prevention today"
+- Discount fraud: include exact unauthorized rate %, discount amount, "AUDIT: pull all discount logs"
+- Show ALL anomaly stores — do NOT truncate to 5 or 8
+
+PART B — BUSINESS-LEVEL KPI IMPROVEMENT ANALYSIS (ALWAYS write — even when Part A has no anomalies):
+This is a mandatory strategic section covering the top 3–4 focus areas for KPI improvement.
+
+📈 HOW TO IMPROVE SPSF (target ₹1,000/sqft/month):
+- Identify the top 5 SPSF underperforming stores from STORE INVENTORY BLOCK (sell lowest SPSF vs chain avg)
+- For each: State SPSF=₹[X] vs chain avg ₹[Y], Gap=₹[Z]/sqft, Sales shortfall=Gap×floor_sqft=₹[W]
+- Key levers: [Footfall × Conversion × ATV × UPT] — which lever is weakest for this store?
+- Specific action: Who must do What by When to move SPSF from ₹[X] to ₹[target]?
+- Floor productivity: High-velocity categories must occupy prime floor space — name specific departments
+
+📊 HOW TO IMPROVE SELL-THROUGH % (target 95%):
+- Identify top 5 stores with lowest sell_thru_pct from STORE INVENTORY BLOCK
+- For each: ST%=[X]% vs target 95%, SOH=[Y] units, DOI=[Z]d → action: [IST/MARKDOWN/PROMO]
+- Slow articles: Cross-reference with BOTTOM 10 ARTICLES (lowest sell_thru_pct) — name top 3 slow articles
+- Chain ST% trend: If chain avg <80% → trigger chain-wide IST + markdown programme
+- Weekly action: "ST% should improve by [X]% per week if [action] is implemented by [date]"
+
+📦 HOW TO MAINTAIN/REDUCE DOI (target ≤30 days):
+- Identify top 5 stores with highest DOI from STORE INVENTORY BLOCK
+- For each: DOI=[X]d vs target ≤30d — excess stock = DOI×daily_sell_rate = [Y] units to clear
+- DOI reduction playbook:
+    DOI >90d + ST% <40% → 🔴 MARKDOWN now — dead stock; propose markdown % and timeline
+    DOI >60d + ST% <60% → 🟠 IST to high-velocity same-Zone store + markdown slowest 20% SKUs
+    DOI >30d + ST% <80% → 🟡 IST to nearest store with DOI <15d in same Region
+    DOI <30d + ST% <60% → 🔵 PROMO PUSH — fresh stock not moving; targeted in-store promotion
+
+🎯 TOP 3–4 BUSINESS FOCUS AREAS (always write, based on data):
+Focus 1: [SPSF/Sell-Thru/DOI/UPT — whichever is furthest from target] — [what, who, when, impact ₹]
+Focus 2: [Second priority KPI] — [what, who, when, impact ₹]
+Focus 3: [Third priority] — [specific store cluster or division that needs intervention]
+Focus 4 (if applicable): [Pilferage/discount/returns if present] — escalation + audit instruction
 
 IST vs MARKDOWN DECISION FRAMEWORK (apply to every anomaly with DOI or ST% data):
   DOI >90d (P1) + ST% <40%  → 🔴 MARKDOWN — dead stock; propose markdown % + list slowest ICODEs
@@ -238,10 +277,12 @@ CHAIN TOTALS RULES:
 - NEVER use per-row averages as chain totals
 
 SPSF RULES:
+- Formula: SPSF = Net Sales (NETAMT) ÷ Carpet/Floor Area (sqft) — monthly basis
 - Chain avg SPSF = value from SPSF CHAIN SUMMARY block — NEVER recompute
-- Per-store SPSF = 'spsf' column — pre-calculated ₹/sqft
-- NEVER report net_sales_amount as SPSF — they are different units
-- NEVER invent or guess sqft values
+- Per-store SPSF = 'spsf' column in store data OR 'net_sales' ÷ 'carpet_area' from STORE INVENTORY BLOCK
+- If store_inventory block has 'net_sales' and 'carpet_area': SPSF = net_sales ÷ carpet_area
+- NEVER report net_sales_amount as SPSF — they are different units (SPSF is ₹/sqft, not total ₹)
+- NEVER invent or guess sqft values — only use pre-computed 'spsf' column or the above formula
 
 KPI CHAIN SUMMARIES — read from injected blocks:
 - SPSF avg → SPSF CHAIN SUMMARY
@@ -278,11 +319,14 @@ UPT (Units Per Transaction):
 
 STORE INVENTORY BLOCK RULES (critical for ST%/DOI in store tables):
 - The SUPPLEMENTARY DATA block contains a "STORE INVENTORY BLOCK" with columns:
-  STORE_ID | store_name | zone | region | mtd_qty | total_soh | sell_thru_pct | doi
-- For Top 10 / Bottom 10 store tables: match each store by STORE_ID or store_name
+  STORE_ID | store_name | zone | region | mtd_qty | net_sales | total_soh | sell_thru_pct | doi
+- For Top 10 / Bottom 10 store tables: match each store by STORE_ID or store_name (case-insensitive)
   and pull sell_thru_pct (ST%) and doi (DOI) from this block
-- If STORE INVENTORY BLOCK exists in SUPPLEMENTARY DATA: NEVER write N/A for ST% or DOI
-- If STORE INVENTORY BLOCK is absent: write "Inv N/A" once in the column header
+- MATCHING RULE: Try STORE_ID match first; if not found, match store_name substring (ignore case)
+- CRITICAL: If STORE INVENTORY BLOCK exists in SUPPLEMENTARY DATA → NEVER write N/A, "–", or blank for ST% or DOI
+- If a store's STORE_ID is not in the inventory block → write "Inv N/A" for that store only
+- If STORE INVENTORY BLOCK is entirely absent → write "Inv N/A" once in the column header
+- sell_thru_pct of 0.0 is a VALID value — show it as "0.0%", NOT as N/A or blank
 
 DISPLAY RULES:
 - Store: always SHRTNAME/store_name + Region + Zone — never numeric STORE_ID alone
@@ -310,26 +354,35 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
     date_label = f"MTD to {latest_sales_date}" if latest_sales_date else "MTD"
     sections: list[str] = []
 
-    # ── Store Inventory Block (ST%, DOI, SOH per store — feeds Section 3) ───
+    # ── Store Inventory Block (ST%, DOI, SOH, net_sales, SPSF per store — feeds Section 3) ───
     store_inv = supplementary_data.get("store_inventory", {})
     if store_inv.get("data") and store_inv.get("columns"):
         data, cols = store_inv["data"], store_inv["columns"]
-        total_soh = sum(float(r.get("total_soh") or 0) for r in data)
-        avg_st = sum(float(r.get("sell_thru_pct") or 0) for r in data) / max(len(data), 1)
-        avg_doi = sum(float(r.get("doi") or 0) for r in data) / max(len(data), 1)
-        # 60 rows: covers Top 10 + Bottom 10 + all mid-range stores the LLM might reference
-        # (was 20 — too few, high-ST% stores like top performers were missing)
-        display_rows = data[:60]
+        total_soh    = sum(float(r.get("total_soh") or 0) for r in data)
+        total_sales  = sum(float(r.get("net_sales") or 0) for r in data)
+        avg_st       = sum(float(r.get("sell_thru_pct") or 0) for r in data) / max(len(data), 1)
+        avg_doi_vals = [float(r.get("doi") or 0) for r in data if float(r.get("doi") or 0) > 0]
+        avg_doi      = sum(avg_doi_vals) / max(len(avg_doi_vals), 1)
+        # Show all stores (up to 500) — LLM needs every store to match Top10/Bottom10
+        display_rows = data[:500]
         sections.append(
             f"═══ STORE INVENTORY BLOCK ({date_label}) — {len(data)} stores "
-            f"| Chain SOH={total_soh:,.0f} units | Chain Avg ST%={avg_st:.1f}% | Chain Avg DOI={avg_doi:.0f}d ═══"
+            f"| Chain SOH={total_soh:,.0f} units | Chain Net Sales=₹{total_sales:,.0f} "
+            f"| Chain Avg ST%={avg_st:.1f}% | Chain Avg DOI={avg_doi:.0f}d ═══"
         )
         sections.append(
-            "  USE THIS BLOCK to fill ST% and DOI columns in TOP 10 / BOTTOM 10 store tables."
+            "  ▶ USE THIS BLOCK to fill ST% and DOI columns in TOP 10 / BOTTOM 10 store tables."
         )
         sections.append(
-            "  Match store by STORE_ID or store_name. "
-            "sell_thru_pct = ST% | doi = DOI (days) | total_soh = SOH units"
+            "  ▶ MATCH: use STORE_ID (exact) OR store_name (case-insensitive substring)."
+        )
+        sections.append(
+            "  ▶ sell_thru_pct=ST% | doi=DOI days | total_soh=SOH units | net_sales=MTD Sales ₹"
+            " | SPSF: if spsf column present use it; else net_sales÷carpet_area"
+        )
+        sections.append(
+            "  ▶ NEVER write N/A, blank, or '–' for ST%/DOI when this block is present."
+            " sell_thru_pct=0.0 is VALID — show as 0.0%, NOT N/A."
         )
         sections.append(" | ".join(str(c) for c in cols))
         sections.append("-" * 80)
