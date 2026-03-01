@@ -1208,8 +1208,9 @@ class PipelineOrchestrator:
             days_elapsed = 1
 
         # Active store filter: STORE_ID = stores.CODE (confirmed join key)
-        STORE_F   = "STORE_ID NOT IN (SELECT CODE FROM `vmart_sales`.`stores` WHERE CLOSING_DATE IS NOT NULL AND CLOSING_DATE != '')"
-        STORE_F_P = "p.STORE_ID NOT IN (SELECT CODE FROM `vmart_sales`.`stores` WHERE CLOSING_DATE IS NOT NULL AND CLOSING_DATE != '')"
+        # ACTIVE='TRUE' is a String column — safe comparison. Avoids CLOSING_DATE Date type issues.
+        STORE_F   = "STORE_ID IN (SELECT CODE FROM `vmart_sales`.`stores` WHERE ACTIVE = 'TRUE')"
+        STORE_F_P = "p.STORE_ID IN (SELECT CODE FROM `vmart_sales`.`stores` WHERE ACTIVE = 'TRUE')"
         # INV_SUB: SOH is Int32 — ifNull ensures unmatched LEFT JOIN rows yield 0, not NULL
         INV_SUB   = "(SELECT ICODE, SUM(ifNull(SOH, 0)) AS SOH FROM `vmart_product`.`inventory_current` GROUP BY ICODE)"
         # Trading divisions only — exclude non-trading items from KPI analytics

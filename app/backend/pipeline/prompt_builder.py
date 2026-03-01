@@ -49,9 +49,11 @@ SECTION 3 — STORE PERFORMANCE (always show BOTH tables, minimum 10 stores each
 → Include Region and Zone columns always.
 → ATV = net_sales_amount ÷ bill_count per store — COMPUTE INLINE (NEVER show N/A if both columns present)
 → UPT = total_qty ÷ bill_count per store — COMPUTE INLINE
-→ ST% and DOI per store: read from STORE INVENTORY BLOCK (sell_thru_pct and doi columns).
-   Match store by STORE_ID or store_name. If STORE INVENTORY BLOCK absent: write "Inv N/A".
-   NEVER write N/A when the STORE INVENTORY BLOCK is present in the prompt.
+→ ST% per store: use sell_thru_pct column — it is PRE-MERGED into every DATA RETRIEVED row.
+   NEVER do a cross-block lookup. NEVER show N/A if the column is present.
+   If sell_thru_pct is missing from a specific store row → write "Inv N/A" for that store only.
+→ DOI per store: use doi column — PRE-MERGED. Same rule as ST%.
+→ total_soh per store: use total_soh column — PRE-MERGED.
 → TOP 3 STORE INSIGHT BLOCK — write for stores #1, #2, #3 separately (minimum 5 bullets each):
    ✅ What's working: SPSF=₹[X], ATV=₹[Y], Bills=[N], UPT=[Z], ST%=[P]% — specific numbers
    ⚠ Threats/Risks: [1 specific risk with data — stock depletion risk if DOI <X days / discount dependency at X%]
@@ -65,7 +67,8 @@ SECTION 3 — STORE PERFORMANCE (always show BOTH tables, minimum 10 stores each
 → Include Region and Zone columns always.
 → ATV = net_sales_amount ÷ bill_count per store — COMPUTE INLINE (never N/A if both columns present)
 → UPT = total_qty ÷ bill_count per store — COMPUTE INLINE
-→ ST% and DOI: read from STORE INVENTORY BLOCK — match by STORE_ID/store_name.
+→ ST%: use sell_thru_pct column (PRE-MERGED into DATA RETRIEVED) — NEVER N/A if present.
+→ DOI: use doi column (PRE-MERGED into DATA RETRIEVED) — NEVER N/A if present.
 → MANDATORY: Show exactly 10 rows sorted worst-first by primary metric. NEVER filter to P1/P2 only.
 → Below table: one action bullet per store in top 5 worst:
    "[Store] — SPSF=₹[Val] | ST%=[X]% | DOI=[Y]d | Gap=₹[Z] | Action: [WHO] must [WHAT] by [WHEN]"
@@ -550,6 +553,89 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
     return "\n".join(sections) if sections else ""
 
 
+def _merge_store_inventory(query_result: dict, supplementary_data: dict) -> dict:
+    """
+    Pre-merge sell_thru_pct, doi, total_soh, net_sales from the store_inventory
+    supplementary block into every matching row of query_result.
+
+    Join key: STORE_ID (String, exact) → fallback: SHRTNAME/store_name (upper, substring).
+    After merge, LLM reads ST%/DOI directly from the main data table — no cross-block lookup.
+    Returns a new query_result dict (original unchanged).
+    """
+    if not query_result.get("data"):
+        return query_result
+
+    store_inv = (supplementary_data or {}).get("store_inventory", {})
+    inv_data  = store_inv.get("data", [])
+    if not inv_data:
+        return query_result
+
+    # Build lookup: {store_id_str: payload}
+    id_lookup: dict = {}
+    name_lookup: dict = {}
+    for row in inv_data:
+        sid   = str(row.get("STORE_ID", row.get("store_id", ""))).strip()
+        sname = str(row.get("store_name", "")).strip().upper()
+        payload = {
+            "sell_thru_pct": row.get("sell_thru_pct"),
+            "doi":           row.get("doi"),
+            "total_soh":     row.get("total_soh"),
+            "inv_net_sales": row.get("net_sales"),
+        }
+        if sid:
+            id_lookup[sid] = payload
+        if sname:
+            name_lookup[sname] = payload
+
+    if not id_lookup:
+        return query_result
+
+    enriched = []
+    cols = list(query_result.get("columns", []))
+    col_lower_set = {c.lower() for c in cols}
+
+    for row in query_result["data"]:
+        row = dict(row)
+        row_lower = {k.lower(): v for k, v in row.items()}
+
+        # 1. Match by STORE_ID (most reliable)
+        sid = str(row_lower.get("store_id", "")).strip()
+        inv = id_lookup.get(sid)
+
+        # 2. Fallback: match by SHRTNAME / store_name (case-insensitive exact)
+        if not inv:
+            shrt = str(row_lower.get("shrtname", row_lower.get("store_name", ""))).strip().upper()
+            if shrt:
+                inv = name_lookup.get(shrt)
+                # 3. Fallback: substring match (handles abbreviations)
+                if not inv:
+                    for name_key, name_payload in name_lookup.items():
+                        if shrt in name_key or name_key in shrt:
+                            inv = name_payload
+                            break
+
+        if inv:
+            for k, v in inv.items():
+                if k not in col_lower_set:
+                    row[k] = v
+
+        enriched.append(row)
+
+    # Add merged columns to column list (if not already present)
+    for col in ["sell_thru_pct", "doi", "total_soh"]:
+        if col not in col_lower_set:
+            # Only add if at least one row got enriched with this col
+            if any(col in r for r in enriched):
+                cols.append(col)
+
+    result = dict(query_result)
+    result["data"] = enriched
+    result["columns"] = cols
+    matched = sum(1 for r in enriched if "sell_thru_pct" in r)
+    logger.info(f"store_inventory pre-merge: {matched}/{len(enriched)} store rows enriched with ST%/DOI")
+    return result
+
+
 def build_analysis_prompt(
     query: str,
     context: dict,
@@ -565,6 +651,10 @@ def build_analysis_prompt(
     kpi_formulas = context.get("kpi_formulas", {})
     chat_history = context.get("chat_history", [])
     latest_sales_date = context.get("latest_sales_date", "")
+
+    # Pre-merge ST%/DOI/SOH into main query result from store_inventory supplementary data.
+    # This eliminates the need for LLM cross-block lookup — values appear directly in DATA RETRIEVED.
+    query_result = _merge_store_inventory(query_result, supplementary_data)
 
     # Format data table
     data_section = _format_data(query_result, latest_sales_date=latest_sales_date)
@@ -634,8 +724,13 @@ def build_analysis_prompt(
         "COLUMN VALUES — NEVER SHOW N/A WHEN DATA IS PRESENT:\n"
         "- ATV: compute net_sales_amount ÷ bill_count inline — NEVER N/A if both columns exist\n"
         "- UPT: compute total_qty ÷ bill_count inline — NEVER N/A if both columns exist\n"
-        "- ST% (stores): read sell_thru_pct from STORE INVENTORY BLOCK — match by STORE_ID/store_name\n"
-        "- DOI (stores): read doi from STORE INVENTORY BLOCK — match by STORE_ID/store_name\n"
+        "- ST% (stores): the sell_thru_pct column IS PRE-MERGED into DATA RETRIEVED rows — use directly\n"
+        "  → NEVER look up from STORE INVENTORY BLOCK — it is already in the main data table\n"
+        "  → If sell_thru_pct = 0.0 → show '0.0%', NOT N/A or '–'\n"
+        "  → If sell_thru_pct is absent from a row → write 'Inv N/A' for that store only\n"
+        "- DOI (stores): the doi column IS PRE-MERGED into DATA RETRIEVED rows — use directly\n"
+        "  → doi=0 means zero inventory (all sold) → show '0d', NOT N/A\n"
+        "  → If doi is absent from a row → write 'Inv N/A' for that store only\n"
         "- ST% (dept/articles): sell_thru_pct column is PRE-COMPUTED — use directly, NEVER N/A\n"
         "- DOI (dept/articles): doi column is PRE-COMPUTED — use directly, NEVER N/A\n"
         "- SOH: total_soh column is PRE-COMPUTED — use directly, NEVER N/A\n"
@@ -646,12 +741,13 @@ def build_analysis_prompt(
         "- Peak Hours ATV: net_sales_amount ÷ txn_count per store — COMPUTE INLINE, NEVER N/A\n"
         "\n"
         "SUPPLEMENTARY DATA:\n"
-        "- STORE INVENTORY BLOCK → fills ST%/DOI in Section 3 store tables\n"
+        "- STORE INVENTORY BLOCK → reference for chain-level SOH/ST%/DOI summaries only\n"
+        "  (per-store ST%/DOI are already merged into DATA RETRIEVED — no lookup needed)\n"
         "- DEPARTMENT BREAKDOWN → Section 4 Dept tables\n"
         "- ARTICLE BREAKDOWN → Section 4 Article tables (TOP and BOTTOM)\n"
         "- TOP 7 HIGHEST MRP → Section 5\n"
         "- PEAK HOURS → Section 7\n"
-        "All Sections 3 (ST%/DOI), 4, 5, 7 MUST use supplementary data even if absent from main DATA block.\n"
+        "All Sections 4, 5, 7 MUST use supplementary data. Section 3 ST%/DOI from DATA RETRIEVED.\n"
         "\n"
         "SECTION 9 (EXECUTIVE CONCLUSION) IS MANDATORY:\n"
         "- ALWAYS end every FORMAT B / FORMAT C response with Section 9.\n"
