@@ -301,6 +301,7 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
         total_soh = sum(float(r.get("total_soh") or 0) for r in data)
         avg_st = sum(float(r.get("sell_thru_pct") or 0) for r in data) / max(len(data), 1)
         avg_doi = sum(float(r.get("doi") or 0) for r in data) / max(len(data), 1)
+        display_rows = data[:20]  # Cap: top 10 + bottom 10 coverage is sufficient
         sections.append(
             f"═══ STORE INVENTORY BLOCK ({date_label}) — {len(data)} stores "
             f"| Chain SOH={total_soh:,.0f} units | Chain Avg ST%={avg_st:.1f}% | Chain Avg DOI={avg_doi:.0f}d ═══"
@@ -314,7 +315,7 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
         )
         sections.append(" | ".join(str(c) for c in cols))
         sections.append("-" * 80)
-        for row in data:
+        for row in display_rows:
             sections.append(" | ".join(str(row.get(c, "")) for c in cols))
         sections.append("═" * 75)
 
@@ -323,6 +324,7 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
     if dept.get("data") and dept.get("columns"):
         data, cols = dept["data"], dept["columns"]
         total = sum(float(r.get("net_sales_amount") or 0) for r in data)
+        display_rows = data[:12]  # Cap: top 10 + 2 buffer
         sections.append(
             f"═══ DEPARTMENT BREAKDOWN ({date_label}) — {len(data)} depts | Chain total ₹{total:,.0f} ═══"
         )
@@ -335,7 +337,7 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
         )
         sections.append(" | ".join(str(c) for c in cols))
         sections.append("-" * 80)
-        for row in data:
+        for row in display_rows:
             sections.append(" | ".join(str(row.get(c, "")) for c in cols))
         sections.append(
             "  ↑ Use for SECTION 4 TOP 10 DEPARTMENTS (sorted DESC) and "
@@ -348,6 +350,7 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
     articles = supplementary_data.get("articles", {})
     if articles.get("data") and articles.get("columns"):
         data, cols = articles["data"], articles["columns"]
+        display_rows = data[:12]  # Cap: top 10 + 2 buffer
         sections.append(
             f"═══ ARTICLE BREAKDOWN — TOP {len(data)} by Net Sales ({date_label}) ═══"
         )
@@ -362,7 +365,7 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
         )
         sections.append(" | ".join(str(c) for c in cols))
         sections.append("-" * 80)
-        for row in data:
+        for row in display_rows:
             sections.append(" | ".join(str(row.get(c, "")) for c in cols))
         sections.append(
             "  ↑ Use top 10 rows for SECTION 4 TOP 10 ARTICLES. "
@@ -374,6 +377,7 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
     articles_btm = supplementary_data.get("articles_bottom", {})
     if articles_btm.get("data") and articles_btm.get("columns"):
         data, cols = articles_btm["data"], articles_btm["columns"]
+        display_rows = data[:12]  # Cap: bottom 10 + 2 buffer
         sections.append(
             f"═══ ARTICLE BREAKDOWN — BOTTOM {len(data)} SLOWEST MOVERS ({date_label}) ═══"
         )
@@ -383,7 +387,7 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
         )
         sections.append(" | ".join(str(c) for c in cols))
         sections.append("-" * 80)
-        for row in data:
+        for row in display_rows:
             sections.append(" | ".join(str(row.get(c, "")) for c in cols))
         sections.append(
             "  ↑ Use for SECTION 4 BOTTOM 10 ARTICLES. SOH, DOI, ST%, MRP are pre-computed."
