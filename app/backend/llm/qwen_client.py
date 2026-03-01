@@ -54,6 +54,24 @@ _HEADERS_BASE = {
                      "Chrome/124.0.0.0 Safari/537.36",
 }
 
+# ─── Circuit breaker — skip Qwen for 5 minutes after a 5xx failure ──────────
+import time as _time
+_cb_failure_time: float = 0.0   # epoch seconds of last 5xx failure
+_CB_COOLDOWN = 300              # 5 minutes
+
+def _cb_tripped() -> bool:
+    """Return True if circuit breaker is open (Qwen recently failed with 5xx)."""
+    return (_time.time() - _cb_failure_time) < _CB_COOLDOWN
+
+def _cb_record_failure():
+    global _cb_failure_time
+    _cb_failure_time = _time.time()
+    logger.warning(f"Qwen circuit breaker opened — skipping for {_CB_COOLDOWN}s")
+
+def _cb_reset():
+    global _cb_failure_time
+    _cb_failure_time = 0.0
+
 # ─── Settings keys ────────────────────────────────────────────────────────────
 
 QWEN_EMAIL_KEY = "qwen_email"
@@ -380,7 +398,10 @@ async def generate(
     model: str = None,
 ) -> str:
     """Generate response via chat.qwen.ai session token (non-streaming).
-    On 401: auto-relogins from Keychain and retries once."""
+    On 401: auto-relogins from Keychain and retries once.
+    Circuit breaker: skips immediately for 5 min after a 5xx failure."""
+    if _cb_tripped():
+        raise RuntimeError("Qwen circuit breaker open — skipping to fallback")
     token = get_token()
     if not token:
         raise ValueError("Qwen not connected — please login in Settings.")
@@ -388,7 +409,7 @@ async def generate(
     model = model or get_model()
     payload = _build_payload(system_prompt, user_prompt, model, max_tokens, temperature, False)
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=15) as client:  # 15s max — fast fail
         resp = await client.post(_CHAT, json=payload, headers=_auth_headers(token))
 
         if resp.status_code == 401:
@@ -399,6 +420,8 @@ async def generate(
             else:
                 raise ValueError("Qwen session expired — re-paste token in Settings.")
 
+        if resp.status_code >= 500:
+            _cb_record_failure()
         resp.raise_for_status()
         data = resp.json()
         content = (
@@ -408,6 +431,7 @@ async def generate(
         )
         if not content:
             raise RuntimeError(f"Empty Qwen response: {data}")
+        _cb_reset()
         logger.info(f"Qwen generate OK — model={model}")
         return content
 
@@ -420,7 +444,10 @@ async def generate_stream(
     model: str = None,
 ) -> AsyncIterator[str]:
     """Stream response via chat.qwen.ai session token.
-    On 401: auto-relogins from Keychain and retries once."""
+    On 401: auto-relogins from Keychain and retries once.
+    Circuit breaker: skips immediately for 5 min after a 5xx failure."""
+    if _cb_tripped():
+        raise RuntimeError("Qwen circuit breaker open — skipping to fallback")
     token = get_token()
     if not token:
         raise ValueError("Qwen not connected — please login in Settings.")
@@ -429,12 +456,14 @@ async def generate_stream(
     payload = _build_payload(system_prompt, user_prompt, model, max_tokens, temperature, True)
 
     async def _stream_with_token(tok: str):
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=90) as client:
             async with client.stream(
                 "POST", _CHAT, json=payload, headers=_auth_headers(tok)
             ) as resp:
                 if resp.status_code == 401:
                     raise ValueError("__401__")
+                if resp.status_code >= 500:
+                    _cb_record_failure()
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
                     line = line.strip()
@@ -457,12 +486,14 @@ async def generate_stream(
     try:
         async for chunk in _stream_with_token(token):
             yield chunk
+        _cb_reset()
     except ValueError as e:
         if "__401__" in str(e):
             logger.warning("Qwen 401 on stream — attempting auto-relogin")
             if await auto_relogin():
                 async for chunk in _stream_with_token(get_token()):
                     yield chunk
+                _cb_reset()
             else:
                 raise ValueError("Qwen session expired — re-paste token in Settings.")
         else:

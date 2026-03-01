@@ -657,11 +657,11 @@ class PipelineOrchestrator:
         )
 
         # ─── STAGE: llm_stream ─────────────────────────────────────────
-        # Adaptive token budget: cloud LLMs (Qwen/Claude/Gemini) are fast → 8000.
-        # Local Ollama (~40 tok/s) → 4000 to keep response time under 2 minutes.
-        _CLOUD_KEYWORDS = ("qwen", "claude", "gemini", "gpt", "openai", "cloud")
-        _is_cloud = any(k in decision.llm_model.lower() for k in _CLOUD_KEYWORDS)
-        _MAX_TOKENS = 8000 if _is_cloud else 4000
+        # Token budget: 6000 tokens works well for both:
+        #   - qwen3-coder:480b-cloud via Ollama (3000 tok/s, cloud-backed) → very fast
+        #   - Qwen3.5-plus via chat.qwen.ai (cloud) → fast
+        #   - Local Ollama 7B → ~180s max (acceptable given streaming starts immediately)
+        _MAX_TOKENS = 6000
         narrative_parts = []
         if "llm_stream" in decision.stages:
             await ws_send({"type": "stage", "stage": "llm_stream"})

@@ -15,8 +15,9 @@ from config import OLLAMA_BASE_URL
 logger = logging.getLogger(__name__)
 
 # Preferred model order (first match wins)
+# qwen3-coder:480b-cloud (cloud-backed, 3000 tok/s) is preferred over local 7B models
 PREFERRED_MODEL_ORDER = [
-    "qwen2.5", "qwen3", "llama3", "llama3.1", "llama3.2",
+    "qwen3", "qwen2.5", "llama3", "llama3.1", "llama3.2",
     "mistral", "gemma3", "gemma2", "phi3", "phi3.5",
     "deepseek", "codellama", "vicuna",
 ]

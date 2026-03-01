@@ -35,7 +35,9 @@ class LLMRouter:
 
         # ── Qwen — always first if configured (default model) ──────────
         from llm import qwen_client
+        _qwen_tried = False
         if qwen_client.is_configured() and model not in {"claude", "gemini", "openai"}:
+            _qwen_tried = True
             try:
                 qwen_model = model if model in qwen_client.QWEN_MODELS else qwen_client.get_model()
                 result = await qwen_client.generate(
@@ -51,8 +53,9 @@ class LLMRouter:
                 errors.append(f"Qwen: {e}")
                 logger.warning(f"Qwen failed: {e}")
 
-        # ── Ollama ─────────────────────────────────────────────────────
-        if model not in CLOUD_PROVIDERS and model not in QWEN_MODEL_IDS:
+        # ── Ollama — fallback when Qwen fails or model is not a cloud provider ──
+        # NOTE: also tried when model is a Qwen ID but Qwen failed (_qwen_tried)
+        if model not in CLOUD_PROVIDERS:
             try:
                 available, resolved = await ollama_client.is_available(model)
                 if available:
@@ -128,7 +131,9 @@ class LLMRouter:
 
         # ── Qwen streaming — always first if configured (default model) ─
         from llm import qwen_client
+        _qwen_tried = False
         if qwen_client.is_configured() and model not in {"claude", "gemini", "openai"}:
+            _qwen_tried = True
             try:
                 qwen_model = model if model in qwen_client.QWEN_MODELS else qwen_client.get_model()
                 async for chunk in qwen_client.generate_stream(
@@ -144,8 +149,9 @@ class LLMRouter:
                 errors.append(f"Qwen: {e}")
                 logger.warning(f"Qwen stream failed: {e}")
 
-        # ── Ollama streaming ───────────────────────────────────────────
-        if model not in CLOUD_PROVIDERS and model not in QWEN_MODEL_IDS:
+        # ── Ollama streaming — fallback when Qwen fails or model is local ─
+        # NOTE: also tried when model is a Qwen ID but Qwen failed (_qwen_tried)
+        if model not in CLOUD_PROVIDERS:
             try:
                 available, resolved = await ollama_client.is_available(model)
                 if available:
