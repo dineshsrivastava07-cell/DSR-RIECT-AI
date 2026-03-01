@@ -47,45 +47,72 @@ SECTION 3 — STORE PERFORMANCE (always show BOTH tables, minimum 10 stores each
 🟢 TOP 10 PERFORMERS (highest metric first):
 | # | Store | Region | Zone | SPSF | vs Target | Net Sales | Bills | UPT | ATV | ST% | DOI |
 → Include Region and Zone columns always.
-→ ATV = net_sales_amount ÷ bill_count per store — COMPUTE INLINE if ATV not a column (NEVER show N/A when both columns exist)
-→ UPT = total_qty ÷ bill_count per store — COMPUTE INLINE if UPT not a column
-→ ST%/DOI: show value if in dataset; write "N/A" only if inventory data absent from this query.
-→ TOP 3 STORE INSIGHT BLOCK (for stores #1, #2, #3 separately):
-   ✅ What's working: [exact metrics — SPSF ₹X, UPT Y.YY, ATV ₹Z, Bills N, ST% X%]
-   ⚠ Threats/Risks: [1 specific risk — stock depletion / high discount dependency / seasonal risk]
-   🔄 Maintain: [1 sustaining action — replenishment trigger / staffing window / promo timing]
-   📋 Replicate in: [name 2–3 specific underperforming stores] — apply [practice] to recover ₹[gap]
-→ Summary bullet for #4–#10: consistent pattern across mid-tier performers (1 line).
+→ ATV = net_sales_amount ÷ bill_count per store — COMPUTE INLINE (NEVER show N/A if both columns present)
+→ UPT = total_qty ÷ bill_count per store — COMPUTE INLINE
+→ ST% and DOI per store: read from STORE INVENTORY BLOCK (sell_thru_pct and doi columns).
+   Match store by STORE_ID or store_name. If STORE INVENTORY BLOCK absent: write "Inv N/A".
+   NEVER write N/A when the STORE INVENTORY BLOCK is present in the prompt.
+→ TOP 3 STORE INSIGHT BLOCK — write for stores #1, #2, #3 separately (minimum 5 bullets each):
+   ✅ What's working: SPSF=₹[X], ATV=₹[Y], Bills=[N], UPT=[Z], ST%=[P]% — specific numbers
+   ⚠ Threats/Risks: [1 specific risk with data — stock depletion risk if DOI <X days / discount dependency at X%]
+   🔄 Maintain: [1 sustaining action — e.g., "Keep replenishment cadence weekly for [dept]; DOI at Xd"]
+   📋 Replicate in: [name 2–3 specific underperforming stores] — apply [specific practice] to recover ₹[gap]
+   🔮 Outlook: [1 sentence — trend if sustained vs. risk if ignored]
+→ Summary bullets for #4–#10: one bullet per store with SPSF, ST%, DOI, key differentiator.
 
 🔴 BOTTOM 10 STORES (worst metric first — show ALL bottom 10, NOT limited to P1/P2 breaches only):
-| # | Store | Region | Zone | SPSF | vs Target | Net Sales | Bills | UPT | ATV | Priority | Gap |
+| # | Store | Region | Zone | SPSF | vs Target | Net Sales | Bills | UPT | ATV | ST% | DOI | Priority | Gap |
 → Include Region and Zone columns always.
 → ATV = net_sales_amount ÷ bill_count per store — COMPUTE INLINE (never N/A if both columns present)
 → UPT = total_qty ÷ bill_count per store — COMPUTE INLINE
+→ ST% and DOI: read from STORE INVENTORY BLOCK — match by STORE_ID/store_name.
 → MANDATORY: Show exactly 10 rows sorted worst-first by primary metric. NEVER filter to P1/P2 only.
-→ Below table: 3 action bullets. Format: "[Store] — [KPI]=₹[Val] | Gap=₹[X] | Action: [WHO] must [WHAT] by [WHEN]"
+→ Below table: one action bullet per store in top 5 worst:
+   "[Store] — SPSF=₹[Val] | ST%=[X]% | DOI=[Y]d | Gap=₹[Z] | Action: [WHO] must [WHAT] by [WHEN]"
 
 SECTION 4 — DEPARTMENT & ARTICLE ANALYSIS (ALWAYS include — data is in SUPPLEMENTARY DATA block)
 
+COLUMN MAPPINGS for dept/article data blocks (use these — they exist in the data):
+  net_sales_amount → Net Sales (₹)   | total_qty → Qty   | bill_count → Bills
+  discount_pct → Disc%               | article_count → Articles
+  total_soh → SOH (stock on hand)    | sell_thru_pct → ST% (pre-computed %)
+  doi → DOI (days, pre-computed)     | avg_mrp → MRP (₹ per unit, from MRPAMT/QTY)
+  STYLE_OR_PATTERN → Pattern         | SIZE → Size        | COLOR → Colour
+  ATV: compute inline = net_sales_amount ÷ bill_count | UPT = total_qty ÷ bill_count
+
 🏆 TOP 10 DEPARTMENTS by Net Sales:
-| # | Division | Section | Department | Net Sales | Qty | UPT | ATV | ST% | Disc% |
-→ 1 insight bullet per top department.
+| # | Division | Section | Department | Net Sales | Qty | Bills | ATV | UPT | ST% | DOI | SOH | Disc% |
+→ ST% = sell_thru_pct column (pre-computed) — NEVER N/A if column present
+→ DOI = doi column (pre-computed days) — NEVER N/A if column present
+→ SOH = total_soh column — NEVER N/A if present
+→ Per-department insight (one bullet each for top 5):
+   "[Dept] — Sales=₹[X], ST%=[Y]%, DOI=[Z]d | [Action: IST/Markdown/Replenish/Promo] | Why: [reason]"
 
-📦 BOTTOM 10 DEPARTMENTS (lowest sales / highest DOI):
-| # | Division | Section | Department | Net Sales | Qty | DOI | ST% | Gap to Target |
+📦 BOTTOM 10 DEPARTMENTS (sorted by net_sales ASC):
+| # | Division | Section | Department | Net Sales | Qty | SOH | DOI | ST% | Gap to Target |
+→ DOI = doi column, ST% = sell_thru_pct column — NEVER N/A if present
+→ 3 clearance action bullets covering the bottom 3 departments with specific DOI/ST% values
 
-🏆 TOP 10 ARTICLES:
-| # | Article | Division | Section | Department | Pattern | Brand | Size | Colour | Net Sales | Qty | MRP | ST% |
-→ Pattern = STYLE_OR_PATTERN, Brand = DIVISION (or brand column if present), Size = SIZE, Colour = COLOR
-→ 1 insight bullet: what's selling, why, reorder recommendation.
+🏆 TOP 10 ARTICLES (from ARTICLE BREAKDOWN — TOP section):
+| # | Article | Division | Section | Department | Pattern | Size | Colour | Net Sales | Qty | MRP | ST% | DOI |
+→ MRP = avg_mrp column (₹/unit) — NEVER N/A if column present
+→ ST% = sell_thru_pct column — NEVER N/A if present
+→ DOI = doi column — NEVER N/A if present
+→ Pattern = STYLE_OR_PATTERN | Size = SIZE | Colour = COLOR
+→ Per-article insight for top 3: "[Article] — ₹[sales], [qty] units, MRP ₹[X], ST%=[Y]% | Reorder if DOI <Xd"
 
-📦 BOTTOM 10 ARTICLES (slowest movers / highest DOI):
-| # | Article | Division | Section | Department | Pattern | Size | Colour | Qty | SOH | DOI | ST% |
-→ 1 insight bullet: markdown recommendation or clearance action.
+📦 BOTTOM 10 ARTICLES (from ARTICLE BREAKDOWN — BOTTOM SLOWEST MOVERS section):
+| # | Article | Division | Section | Department | Pattern | Size | Colour | Qty | SOH | DOI | ST% | MRP |
+→ SOH = total_soh column | DOI = doi column | ST% = sell_thru_pct column | MRP = avg_mrp column
+→ ALL these columns are pre-computed — NEVER show N/A for any of them
+→ Per-article clearance action for bottom 3: "[Article] — SOH=[X] units, DOI=[Y]d, ST%=[Z]% → [IST/MARKDOWN/PROMO]"
 
 SECTION 5 — TOP 7 HIGHEST SELLING MRP (ALWAYS include — data is in SUPPLEMENTARY DATA block)
-| # | Article | Division | Section | Department | Pattern | Brand | Size | Colour | MRP | Net Sales | Qty | ST% | DOI |
-→ 1 insight bullet: premium product performance, pricing strategy.
+| # | Article | Division | Section | Department | Pattern | Size | Colour | MRP | Net Sales | Qty | ST% | DOI | SOH |
+→ MRP = unit_mrp column (₹) — NEVER N/A
+→ Qty = total_qty column — NEVER N/A (total_qty IS the quantity column)
+→ ST% = sell_thru_pct column | DOI = doi column | SOH = total_soh column — all pre-computed
+→ Per-article insight for all 7: "[Article] MRP=₹[X], Qty=[Y], ST%=[Z]%, DOI=[D]d | [Premium/velocity/reorder note]"
 
 SECTION 6 — ANOMALIES (only genuine issues — NOT top performers)
 Use ANOMALY DETECTION OUTPUT. For each anomaly show:
@@ -113,21 +140,64 @@ TOP 3 ACTIONS PER P1/P2 ANOMALY STORE:
   3. 🟡 Recovery (this month): [metric target, e.g. "Reduce DOI from [X]d to <30d / raise ST% from [Y]% to >60%"]
 
 SECTION 7 — PEAK HOURS ANALYSIS (ALWAYS include — data is in SUPPLEMENTARY DATA block)
-Use PEAK HOURS CHAIN SUMMARY:
-| Time Slot | Transactions | Unique Customers (Bills) | Unique Customers (Mobile) | Revenue | Avg Bill Value | Stores Active |
+
+COLUMN MAPPINGS for peak hours data:
+  txn_count = COUNT(DISTINCT BILLNO) = number of unique bills/transactions (Transactions column)
+  unique_customers = COUNT(DISTINCT CUSTOMER_MOBILE) = mobile-registered unique customers
+  net_sales_amount = Revenue (₹)
+  total_qty = units sold in that hour
+  UPT per store = total_qty ÷ txn_count — COMPUTE INLINE (NEVER N/A if both columns present)
+  ATV per store = net_sales_amount ÷ txn_count — COMPUTE INLINE (NEVER N/A if both columns present)
+  Unique Customers (Mobile) = unique_customers column — NEVER N/A (use 0 if value is 0)
+
+Use PEAK HOURS CHAIN SUMMARY block from supplementary data:
+| Time Slot | Transactions | Unique Cust (Mobile) | Revenue | Avg Bill Value | Stores Active |
 → Time Slot = "HH:00–HH:59" format (e.g., 11:00–11:59)
-→ Unique Customers (Bills) = COUNT(DISTINCT BILLNO) per hour
-→ Unique Customers (Mobile) = COUNT(DISTINCT CUSTOMER_MOBILE) per hour
-→ Show ALL stores with their peak time slot, top 3 hours, total transactions, and customer counts.
-Store Peak Table:
-| Store | Region | Zone | Peak Slot | 2nd Peak | 3rd Peak | Total Bills | Unique Customers | Revenue | UPT | ATV |
-→ 3 actionable bullets: staffing window, replenishment timing, promotion launch recommendation.
+→ Unique Cust (Mobile) = unique_customers column per hour — if 0 for a slot, show 0, NOT N/A
+→ Avg Bill Value = net_sales_amount ÷ txn_count per hour slot
+
+Show ALL stores in Store Peak Table:
+| Store | Region | Zone | Peak Slot | 2nd Peak | 3rd Peak | Total Bills | Unique Cust (Mobile) | Revenue | UPT | ATV |
+→ UPT = total_qty ÷ txn_count per store row — COMPUTE INLINE, NEVER N/A
+→ ATV = net_sales_amount ÷ txn_count per store row — COMPUTE INLINE, NEVER N/A
+→ Unique Cust (Mobile) = unique_customers — if column present, NEVER N/A
+→ 5 actionable insight bullets: peak staffing slot, floor replenishment window, mobile CRM opportunity (if unique_customers > 0), promotion launch window, slow-hour intervention
 
 SECTION 8 — PRIORITY ACTIONS
 Numbered list. Format per item:
   [N]. 🔴/🟠/🟡 [STORE/DEPT/ARTICLE] — [METRIC]=[VALUE] vs target=[TARGET] | Gap=[X]
        Action: [WHO] must [WHAT] by [WHEN] to recover [₹X or X%]
 Group: 🔴 Critical (act today) → 🟠 High (this week) → 🟡 Medium (this month)
+Minimum: 5 actions in 🔴, 5 in 🟠, 5 in 🟡.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — EXECUTIVE CONCLUSION & OVERALL SUMMARY
+(MANDATORY — ALWAYS appears at the very end of every FORMAT B / FORMAT C response)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 CHAIN HEALTH SNAPSHOT
+  • [Period]: [date/MTD range], [N] active stores, Chain Net Sales=₹[X], SPSF=₹[Y] vs ₹1,000 target
+  • P1=[N] stores critical | P2=[N] high | On-Target=[N] | Chain ST%=[X]% | Chain DOI=[Y]d
+
+🏆 TOP 3 WINS (what is working — cite specific store/dept/article + exact numbers)
+  1. [Win 1]: [Store/Dept/Article] — [metric]=₹[X] | Reason: [why it works]
+  2. [Win 2]: [specific data]
+  3. [Win 3]: [specific data]
+
+⚠ TOP 3 CRITICAL RISKS (what needs immediate action — P1/P2 with owners)
+  1. 🔴 [Risk 1]: [Store/Dept] — [metric]=[value] | Owner: [Zone/Regional Manager] | Deadline: [date]
+  2. 🟠 [Risk 2]: [specific data]
+  3. 🟠 [Risk 3]: [specific data]
+
+📋 THIS WEEK'S TOP 5 PRIORITY ACTIONS
+  1. [Action 1] — WHO: [owner] | WHAT: [specific action] | BY: [date] | IMPACT: ₹[recovery estimate]
+  2. [Action 2] ...
+  3. [Action 3] ...
+  4. [Action 4] ...
+  5. [Action 5] ...
+
+🔮 30-DAY OUTLOOK
+  [1–2 sentences: If current pattern continues → what happens to SPSF/ST%/DOI. What inflection point to watch.]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ══ FORMAT C — INSIGHT / STRATEGY REQUEST ════════════════
 Trigger: "why", "analyse", "what's driving", "recommend", "strategy", "compare"
@@ -176,14 +246,24 @@ UPT (Units Per Transaction):
 - Formula: total_qty ÷ bill_count (per store)
 - ALWAYS compute inline — never show N/A if qty and bill_count columns exist
 
+STORE INVENTORY BLOCK RULES (critical for ST%/DOI in store tables):
+- The SUPPLEMENTARY DATA block contains a "STORE INVENTORY BLOCK" with columns:
+  STORE_ID | store_name | zone | region | mtd_qty | total_soh | sell_thru_pct | doi
+- For Top 10 / Bottom 10 store tables: match each store by STORE_ID or store_name
+  and pull sell_thru_pct (ST%) and doi (DOI) from this block
+- If STORE INVENTORY BLOCK exists in SUPPLEMENTARY DATA: NEVER write N/A for ST% or DOI
+- If STORE INVENTORY BLOCK is absent: write "Inv N/A" once in the column header
+
 DISPLAY RULES:
-- Store: always SHRTNAME + Region + Zone — never numeric STORE_ID alone
+- Store: always SHRTNAME/store_name + Region + Zone — never numeric STORE_ID alone
 - Article: ARTICLENAME [DIVISION > SECTION > DEPARTMENT] | Pattern: STYLE_OR_PATTERN | Size: SIZE | Colour: COLOR
-- Customer count: show both bill-count (COUNT DISTINCT BILLNO) and mobile-count (COUNT DISTINCT CUSTOMER_MOBILE) separately
-- Monetary: ₹ format with commas, 2 decimal places (e.g. ₹1,05,432.50)
+- Customer count (peak hours): txn_count = bills (unique BILLNO), unique_customers = mobile registrations
+- Monetary: ₹ format with commas (e.g. ₹1,05,432)
 - Percentage: 1 decimal place (e.g. 82.3%)
-- MRP: always ₹ format — sourced from vitem_data.MRP or pos_transactional_data if selected
-- NEVER hallucinate values — if a column is missing from data, state it explicitly
+- MRP: avg_mrp or unit_mrp column — ₹ format. NEVER N/A if column present
+- Qty: total_qty column — NEVER N/A if column present
+- SOH: total_soh column — NEVER N/A if column present
+- NEVER hallucinate values — if a column is genuinely absent from ALL data blocks, write "Col N/A" once
 - NEVER show numeric STORE_ID as a store name
 """
 
@@ -191,7 +271,7 @@ DISPLAY RULES:
 def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str = "") -> str:
     """
     Format pre-fetched supplementary query results into labelled data blocks.
-    Feeds SECTION 4 (dept/articles), SECTION 5 (top MRP), SECTION 7 (peak hours).
+    Feeds: STORE INVENTORY BLOCK (Section 3 ST%/DOI), Sections 4, 5, 7.
     Each section is independently formatted; any failed query is silently skipped.
     """
     if not supplementary_data:
@@ -199,6 +279,30 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
 
     date_label = f"MTD to {latest_sales_date}" if latest_sales_date else "MTD"
     sections: list[str] = []
+
+    # ── Store Inventory Block (ST%, DOI, SOH per store — feeds Section 3) ───
+    store_inv = supplementary_data.get("store_inventory", {})
+    if store_inv.get("data") and store_inv.get("columns"):
+        data, cols = store_inv["data"], store_inv["columns"]
+        total_soh = sum(float(r.get("total_soh") or 0) for r in data)
+        avg_st = sum(float(r.get("sell_thru_pct") or 0) for r in data) / max(len(data), 1)
+        avg_doi = sum(float(r.get("doi") or 0) for r in data) / max(len(data), 1)
+        sections.append(
+            f"═══ STORE INVENTORY BLOCK ({date_label}) — {len(data)} stores "
+            f"| Chain SOH={total_soh:,.0f} units | Chain Avg ST%={avg_st:.1f}% | Chain Avg DOI={avg_doi:.0f}d ═══"
+        )
+        sections.append(
+            "  USE THIS BLOCK to fill ST% and DOI columns in TOP 10 / BOTTOM 10 store tables."
+        )
+        sections.append(
+            "  Match store by STORE_ID or store_name. "
+            "sell_thru_pct = ST% | doi = DOI (days) | total_soh = SOH units"
+        )
+        sections.append(" | ".join(str(c) for c in cols))
+        sections.append("-" * 80)
+        for row in data:
+            sections.append(" | ".join(str(row.get(c, "")) for c in cols))
+        sections.append("═" * 75)
 
     # ── Department Breakdown ─────────────────────────────────────────────────
     dept = supplementary_data.get("dept", {})
@@ -208,13 +312,21 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
         sections.append(
             f"═══ DEPARTMENT BREAKDOWN ({date_label}) — {len(data)} depts | Chain total ₹{total:,.0f} ═══"
         )
+        sections.append(
+            "  Columns: net_sales_amount(₹) | total_qty | bill_count | discount_pct(%) | article_count"
+            " | total_soh(SOH units) | sell_thru_pct(ST%) | doi(days)"
+        )
+        sections.append(
+            "  ATV = net_sales_amount / bill_count | UPT = total_qty / bill_count (compute inline)"
+        )
         sections.append(" | ".join(str(c) for c in cols))
         sections.append("-" * 80)
         for row in data:
             sections.append(" | ".join(str(row.get(c, "")) for c in cols))
         sections.append(
-            "  ↑ Use this for SECTION 4 TOP 10 / BOTTOM 10 DEPARTMENTS. "
-            "Compute ATV = net_sales_amount / bill_count per dept."
+            "  ↑ Use for SECTION 4 TOP 10 DEPARTMENTS (sorted DESC) and "
+            "BOTTOM 10 DEPARTMENTS (sorted ASC by net_sales). "
+            "sell_thru_pct and doi are PRE-COMPUTED — never N/A."
         )
         sections.append("═" * 75)
 
@@ -226,15 +338,21 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
             f"═══ ARTICLE BREAKDOWN — TOP {len(data)} by Net Sales ({date_label}) ═══"
         )
         sections.append(
-            "  Columns include: STYLE_OR_PATTERN (Pattern), SIZE, COLOR, avg_mrp, bill_count"
+            "  Columns: ICODE | ARTICLENAME | DIVISION | SECTION | DEPARTMENT"
+            " | STYLE_OR_PATTERN(Pattern) | SIZE | COLOR | net_sales_amount(₹)"
+            " | total_qty(Qty) | bill_count | avg_mrp(MRP ₹/unit)"
+            " | total_soh(SOH) | sell_thru_pct(ST%) | doi(DOI days)"
+        )
+        sections.append(
+            "  ALL of avg_mrp, total_soh, sell_thru_pct, doi are PRE-COMPUTED — NEVER show N/A for these."
         )
         sections.append(" | ".join(str(c) for c in cols))
         sections.append("-" * 80)
         for row in data:
             sections.append(" | ".join(str(row.get(c, "")) for c in cols))
         sections.append(
-            "  ↑ Use top 10 rows for SECTION 4 TOP 10 ARTICLES table. "
-            "Use bottom rows (if available) for BOTTOM 10 ARTICLES."
+            "  ↑ Use top 10 rows for SECTION 4 TOP 10 ARTICLES. "
+            "avg_mrp = MRP column. total_qty = Qty column. sell_thru_pct = ST%."
         )
         sections.append("═" * 75)
 
@@ -243,16 +361,19 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
     if articles_btm.get("data") and articles_btm.get("columns"):
         data, cols = articles_btm["data"], articles_btm["columns"]
         sections.append(
-            f"═══ ARTICLE BREAKDOWN — BOTTOM {len(data)} SLOWEST MOVERS by Net Sales ({date_label}) ═══"
+            f"═══ ARTICLE BREAKDOWN — BOTTOM {len(data)} SLOWEST MOVERS ({date_label}) ═══"
         )
         sections.append(
-            "  ↑ Use this for SECTION 4 BOTTOM 10 ARTICLES table. "
-            "Sorted ASC = worst sellers at top."
+            "  Sorted ASC = worst sellers first. Same columns as top articles:"
+            " total_soh(SOH) | sell_thru_pct(ST%) | doi(DOI days) | avg_mrp(MRP) — ALL PRE-COMPUTED."
         )
         sections.append(" | ".join(str(c) for c in cols))
         sections.append("-" * 80)
         for row in data:
             sections.append(" | ".join(str(row.get(c, "")) for c in cols))
+        sections.append(
+            "  ↑ Use for SECTION 4 BOTTOM 10 ARTICLES. SOH, DOI, ST%, MRP are pre-computed."
+        )
         sections.append("═" * 75)
 
     # ── Peak Hours ───────────────────────────────────────────────────────────
@@ -289,15 +410,21 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
             f"═══ TOP 7 HIGHEST MRP ARTICLES ({date_label}) ═══"
         )
         sections.append(
-            "  unit_mrp = selling price (₹), net_sales_amount = MTD revenue, "
-            "STYLE_OR_PATTERN = Pattern, SIZE, COLOR included"
+            "  unit_mrp = MRP (₹/unit, from vitem_data) | net_sales_amount = Revenue (₹)"
+            " | total_qty = Qty sold | bill_count = Bills"
+            " | total_soh = SOH | sell_thru_pct = ST% | doi = DOI (days)"
+        )
+        sections.append(
+            "  ALL of unit_mrp, total_qty, total_soh, sell_thru_pct, doi are PRE-COMPUTED — NEVER N/A."
+            " total_qty IS the Qty column — use it directly."
         )
         sections.append(" | ".join(str(c) for c in cols))
         sections.append("-" * 80)
         for row in data[:7]:
             sections.append(" | ".join(str(row.get(c, "")) for c in cols))
         sections.append(
-            "  ↑ Use this for SECTION 5 TOP 7 HIGHEST SELLING MRP table."
+            "  ↑ Use for SECTION 5 TOP 7 HIGHEST SELLING MRP. "
+            "unit_mrp=MRP, total_qty=Qty, sell_thru_pct=ST%, doi=DOI."
         )
         sections.append("═" * 75)
 
@@ -380,18 +507,48 @@ def build_analysis_prompt(
     parts.append(
         "Detect the query type (RAW DATA / KPI ANALYSIS / INSIGHT-STRATEGY) and apply the correct FORMAT.\n"
         "MANDATORY — THESE RULES OVERRIDE EVERYTHING:\n"
-        "- ROW COUNTS ARE NON-NEGOTIABLE: Top 10 = 10 rows, Bottom 10 = 10 rows, Top 7 = 7 rows.\n"
-        "  NEVER stop at 3, 5, or any fewer rows. If 10 rows exist in data, show ALL 10.\n"
-        "  Pick the top N / bottom N by rank — do NOT summarise or truncate mid-table.\n"
-        "- COMPLETE EVERY TABLE FULLY before moving to the next section.\n"
-        "- SUPPLEMENTARY DATA block contains dept, article, peak hours, MRP data — use ALL of it.\n"
-        "  Sections 4, 5, 7 MUST appear using that data even if not in main DATA RETRIEVED.\n"
-        "- No paragraphs. No storytelling. Tables, bullets, numbered lists only.\n"
-        "- Every number must cite its source (store name, date, column).\n"
-        "- Every P1/P2/P3 breach: EXACT store + EXACT metric value + risk flag (🔴/🟠).\n"
-        "- Every action: WHO + WHAT + HOW MUCH (gap) + specific ACTION.\n"
-        "- Use CHAIN TOTALS for net sales/qty. Use KPI CHAIN SUMMARIES for KPI averages.\n"
-        "- If a metric column is absent from ALL data blocks: write N/A once — never invent values."
+        "\n"
+        "ROW COUNTS (NON-NEGOTIABLE):\n"
+        "- Top 10 = exactly 10 rows | Bottom 10 = exactly 10 rows | Top 7 = exactly 7 rows.\n"
+        "- NEVER stop at 3, 5, or any fewer. COMPLETE EVERY TABLE before moving to next section.\n"
+        "\n"
+        "COLUMN VALUES — NEVER SHOW N/A WHEN DATA IS PRESENT:\n"
+        "- ATV: compute net_sales_amount ÷ bill_count inline — NEVER N/A if both columns exist\n"
+        "- UPT: compute total_qty ÷ bill_count inline — NEVER N/A if both columns exist\n"
+        "- ST% (stores): read sell_thru_pct from STORE INVENTORY BLOCK — match by STORE_ID/store_name\n"
+        "- DOI (stores): read doi from STORE INVENTORY BLOCK — match by STORE_ID/store_name\n"
+        "- ST% (dept/articles): sell_thru_pct column is PRE-COMPUTED — use directly, NEVER N/A\n"
+        "- DOI (dept/articles): doi column is PRE-COMPUTED — use directly, NEVER N/A\n"
+        "- SOH: total_soh column is PRE-COMPUTED — use directly, NEVER N/A\n"
+        "- MRP: avg_mrp (articles/dept) or unit_mrp (top MRP section) — NEVER N/A if column present\n"
+        "- Qty: total_qty column — NEVER N/A if column present\n"
+        "- Unique Customers (Mobile): unique_customers column — show 0 if zero, NEVER N/A\n"
+        "- Peak Hours UPT: total_qty ÷ txn_count per store — COMPUTE INLINE, NEVER N/A\n"
+        "- Peak Hours ATV: net_sales_amount ÷ txn_count per store — COMPUTE INLINE, NEVER N/A\n"
+        "\n"
+        "SUPPLEMENTARY DATA:\n"
+        "- STORE INVENTORY BLOCK → fills ST%/DOI in Section 3 store tables\n"
+        "- DEPARTMENT BREAKDOWN → Section 4 Dept tables\n"
+        "- ARTICLE BREAKDOWN → Section 4 Article tables (TOP and BOTTOM)\n"
+        "- TOP 7 HIGHEST MRP → Section 5\n"
+        "- PEAK HOURS → Section 7\n"
+        "All Sections 3 (ST%/DOI), 4, 5, 7 MUST use supplementary data even if absent from main DATA block.\n"
+        "\n"
+        "SECTION 9 (EXECUTIVE CONCLUSION) IS MANDATORY:\n"
+        "- ALWAYS end every FORMAT B / FORMAT C response with Section 9.\n"
+        "- Include: Chain Health Snapshot | Top 3 Wins | Top 3 Risks | Top 5 Actions | 30-Day Outlook.\n"
+        "\n"
+        "INSIGHTS — MINIMUM DEPTH REQUIRED:\n"
+        "- Every section: minimum 3 insight bullets with specific numbers, store/dept/article names.\n"
+        "- Section 3 Top 3 stores: 5-bullet insight block each (What's Working, Risk, Maintain, Replicate, Outlook).\n"
+        "- Section 8 Priority Actions: minimum 5 per priority tier (5 Critical, 5 High, 5 Medium).\n"
+        "\n"
+        "GENERAL:\n"
+        "- No paragraphs. Tables, bullets, numbered lists only.\n"
+        "- Every number: cite source (store name, date, column). Every P1/P2: exact value + risk flag.\n"
+        "- Every action: WHO + WHAT + HOW MUCH (gap) + WHEN.\n"
+        "- Use CHAIN TOTALS for net sales/qty. KPI CHAIN SUMMARIES for chain averages.\n"
+        "- If a column is genuinely absent from ALL data blocks: write 'Col N/A' once in header."
     )
 
     user_prompt = "\n".join(parts)
@@ -991,7 +1148,8 @@ def _build_peak_hours_summary(data: list, columns: list) -> str:
             if store:
                 hour_agg[h]["stores"].add(store)
                 if store not in store_hours:
-                    store_hours[store] = {"zone": zone, "region": region, "hours": {}}
+                    store_hours[store] = {"zone": zone, "region": region, "total_qty": 0.0, "hours": {}}
+                store_hours[store]["total_qty"] += qty
                 if h not in store_hours[store]["hours"]:
                     store_hours[store]["hours"][h] = {"txn": 0.0, "cust": 0.0, "rev": 0.0}
                 store_hours[store]["hours"][h]["txn"]  += txn
@@ -1064,17 +1222,26 @@ def _build_peak_hours_summary(data: list, columns: list) -> str:
         ]
         if store_peaks:
             lines.append("  Per-Store Peak Hours (all stores, sorted by peak transactions):")
-            lines.append("  Store | Zone | Region | Peak Slot | Bills | Unique Customers | Revenue | Top 3 Slots")
+            lines.append(
+                "  Store | Zone | Region | Peak Slot | Bills | Unique Cust (Mobile)"
+                " | Revenue | UPT | ATV | Top 3 Slots"
+            )
             for store, ph, ptxn, prev, top3s in store_peaks:
                 s_info = store_hours.get(store, {})
                 zone   = s_info.get("zone", "")
                 region = s_info.get("region", "")
                 hrs    = s_info.get("hours", {})
                 peak_cust = hrs.get(ph, {}).get("cust", 0)
+                # Compute store-level UPT and ATV across all hours
+                store_total_qty  = s_info.get("total_qty", 0)
+                store_total_txn  = sum(h.get("txn", 0) for h in hrs.values())
+                store_total_rev  = sum(h.get("rev", 0) for h in hrs.values())
+                upt_str = f"{store_total_qty / store_total_txn:.2f}" if store_total_txn > 0 else "0.00"
+                atv_str = f"₹{store_total_rev / store_total_txn:,.0f}" if store_total_txn > 0 else "₹0"
                 lines.append(
                     f"    {store} | {zone} | {region} | {fmt_hr(ph)}"
-                    f" | {ptxn:.0f} bills | {peak_cust:.0f} customers"
-                    f" | ₹{prev:,.0f} | {top3s}"
+                    f" | {ptxn:.0f} bills | {peak_cust:.0f}"
+                    f" | ₹{prev:,.0f} | {upt_str} | {atv_str} | {top3s}"
                 )
         lines.append(
             "  Insight use: staffing schedule, floor replenishment, promotion launch windows"

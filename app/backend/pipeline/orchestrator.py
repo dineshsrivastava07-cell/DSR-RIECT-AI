@@ -598,6 +598,33 @@ class PipelineOrchestrator:
             except Exception:
                 pass
 
+        # ─── Merge store_inventory anomalies (ST%, DOI) into kpi_results ──
+        # Runs anomaly detection on store-level inventory data to surface
+        # sell-through and DOI outliers that aren't in the main sales query.
+        if supplementary_data.get("store_inventory", {}).get("data"):
+            try:
+                import pandas as pd
+                from riect.kpi_engine.anomaly_engine import detect_anomalies
+                inv_df = pd.DataFrame(supplementary_data["store_inventory"]["data"])
+                inv_df.columns = [c.lower().strip() for c in inv_df.columns]
+                inv_anom = detect_anomalies(inv_df)
+                if inv_anom.get("anomalies"):
+                    existing_anom = kpi_results.get("anomalies", {})
+                    prev_list = existing_anom.get("anomalies", [])
+                    merged = prev_list + inv_anom["anomalies"]
+                    merged.sort(key=lambda x: (
+                        0 if x.get("severity") == "P1" else 1,
+                        -abs(x.get("z_score", 0))
+                    ))
+                    kpi_results.setdefault("anomalies", {})
+                    kpi_results["anomalies"]["anomalies"]       = merged
+                    kpi_results["anomalies"]["total_anomalies"] = len(merged)
+                    kpi_results["anomalies"]["p1_anomalies"]    = sum(1 for a in merged if a.get("severity") == "P1")
+                    kpi_results["anomalies"]["p2_anomalies"]    = sum(1 for a in merged if a.get("severity") == "P2")
+                    logger.info(f"Inventory anomalies merged: {len(inv_anom['anomalies'])} new findings")
+            except Exception as e:
+                logger.warning(f"Store inventory anomaly detection failed: {e}")
+
         # ─── STAGE: alert_generate ─────────────────────────────────────
         if "alert_generate" in decision.stages:
             await ws_send({"type": "stage", "stage": "alert_generate"})
@@ -1151,8 +1178,8 @@ class PipelineOrchestrator:
 
     def _run_supplementary_queries(self, context: dict) -> dict:
         """
-        Run 4 pre-built supplementary data queries for comprehensive analysis.
-        Returns: {dept, articles, peak_hours, top_mrp} — each a query_result dict.
+        Run 6 pre-built supplementary data queries for comprehensive analysis.
+        Returns: {store_inventory, dept, articles, articles_bottom, peak_hours, top_mrp}
         Any individual failure returns {} for that key — never raises.
         Called only when latest_sales_date is known and main query returned data.
         """
@@ -1160,91 +1187,158 @@ class PipelineOrchestrator:
         if not date:
             return {}
 
+        # Days elapsed in current month (for DOI = SOH / (mtd_qty / days_elapsed))
+        from datetime import datetime as _dt
+        try:
+            days_elapsed = max(_dt.strptime(date, "%Y-%m-%d").day, 1)
+        except Exception:
+            days_elapsed = 1
+
         STORE_F   = "STORE_ID NOT IN (SELECT CODE FROM `vmart_sales`.`stores` WHERE CLOSING_DATE IS NOT NULL)"
         STORE_F_P = "p.STORE_ID NOT IN (SELECT CODE FROM `vmart_sales`.`stores` WHERE CLOSING_DATE IS NOT NULL)"
+        # Inventory SOH subquery (chain-level per ICODE — used in dept + article queries)
+        INV_SUB   = "(SELECT ICODE, SUM(toFloat64OrZero(SOH)) AS SOH FROM `vmart_product`.`inventory_current` GROUP BY ICODE)"
 
         supp: dict = {}
         try:
             from clickhouse.query_runner import run_query
 
-            # 1. Department breakdown — MTD, top 25 by net sales
+            # 0. Store-level inventory: SOH, Sell-Through %, DOI per store — feeds ST%/DOI in store tables
+            try:
+                supp["store_inventory"] = run_query(f"""
+                    WITH mtd AS (
+                        SELECT STORE_ID, ICODE, SUM(QTY) AS mtd_qty
+                        FROM `vmart_sales`.`pos_transactional_data`
+                        WHERE toDate(BILLDATE) >= toStartOfMonth(toDate('{date}'))
+                          AND toDate(BILLDATE) <= toDate('{date}')
+                          AND QTY > 0
+                          AND {STORE_F}
+                        GROUP BY STORE_ID, ICODE
+                    )
+                    SELECT
+                        ms.STORE_ID,
+                        anyLast(st.SHRTNAME)  AS store_name,
+                        anyLast(st.ZONE)      AS zone,
+                        anyLast(st.REGION)    AS region,
+                        SUM(ms.mtd_qty)       AS mtd_qty,
+                        SUM(toFloat64OrZero(inv.SOH)) AS total_soh,
+                        round(SUM(ms.mtd_qty) / nullIf(SUM(ms.mtd_qty) + SUM(toFloat64OrZero(inv.SOH)), 0) * 100, 1)
+                            AS sell_thru_pct,
+                        round(SUM(toFloat64OrZero(inv.SOH)) / nullIf(SUM(ms.mtd_qty) / {days_elapsed}, 0), 0)
+                            AS doi
+                    FROM mtd ms
+                    LEFT JOIN `vmart_product`.`inventory_current` inv
+                        ON ms.STORE_ID = inv.STORE_ID AND ms.ICODE = inv.ICODE
+                    LEFT JOIN `vmart_sales`.`stores` st ON ms.STORE_ID = st.CODE
+                    WHERE st.CLOSING_DATE IS NULL
+                    GROUP BY ms.STORE_ID
+                    HAVING SUM(ms.mtd_qty) > 0
+                    ORDER BY sell_thru_pct ASC
+                    LIMIT 100
+                """)
+            except Exception as e:
+                logger.warning(f"Supp store_inventory query failed: {e}")
+
+            # 1. Department breakdown — MTD, top 25 by net sales + inventory ST% and DOI
             try:
                 supp["dept"] = run_query(f"""
-                    SELECT DIVISION, SECTION, DEPARTMENT,
-                           SUM(NETAMT)               AS net_sales_amount,
-                           SUM(QTY)                  AS total_qty,
-                           COUNT(DISTINCT BILLNO)    AS bill_count,
-                           SUM(GROSSAMT)             AS total_gross,
-                           SUM(DISCOUNTAMT)          AS total_discount,
-                           round(SUM(DISCOUNTAMT) / nullIf(SUM(GROSSAMT), 0) * 100, 1) AS discount_pct,
-                           COUNT(DISTINCT ARTICLECODE) AS article_count
-                    FROM `vmart_sales`.`pos_transactional_data`
-                    WHERE toDate(BILLDATE) >= toStartOfMonth(toDate('{date}'))
-                      AND toDate(BILLDATE) <= toDate('{date}')
-                      AND QTY > 0
-                      AND {STORE_F}
-                    GROUP BY DIVISION, SECTION, DEPARTMENT
+                    SELECT
+                        p.DIVISION, p.SECTION, p.DEPARTMENT,
+                        SUM(p.NETAMT)                AS net_sales_amount,
+                        SUM(p.QTY)                   AS total_qty,
+                        COUNT(DISTINCT p.BILLNO)     AS bill_count,
+                        SUM(p.GROSSAMT)              AS total_gross,
+                        SUM(p.DISCOUNTAMT)           AS total_discount,
+                        round(SUM(p.DISCOUNTAMT) / nullIf(SUM(p.GROSSAMT), 0) * 100, 1) AS discount_pct,
+                        COUNT(DISTINCT p.ARTICLECODE) AS article_count,
+                        SUM(toFloat64OrZero(inv.SOH)) AS total_soh,
+                        round(SUM(p.QTY) / nullIf(SUM(p.QTY) + SUM(toFloat64OrZero(inv.SOH)), 0) * 100, 1)
+                            AS sell_thru_pct,
+                        round(SUM(toFloat64OrZero(inv.SOH)) / nullIf(SUM(p.QTY) / {days_elapsed}, 0), 0)
+                            AS doi
+                    FROM `vmart_sales`.`pos_transactional_data` p
+                    LEFT JOIN {INV_SUB} inv ON p.ICODE = inv.ICODE
+                    WHERE toDate(p.BILLDATE) >= toStartOfMonth(toDate('{date}'))
+                      AND toDate(p.BILLDATE) <= toDate('{date}')
+                      AND p.QTY > 0
+                      AND {STORE_F_P}
+                    GROUP BY p.DIVISION, p.SECTION, p.DEPARTMENT
                     ORDER BY net_sales_amount DESC
                     LIMIT 25
                 """)
             except Exception as e:
                 logger.warning(f"Supp dept query failed: {e}")
 
-            # 2. Article breakdown — MTD, top 25 by net sales (for Top 10 + Bottom context)
+            # 2. Article breakdown — MTD top 25 + inventory SOH, ST%, DOI, MRP
             try:
                 supp["articles"] = run_query(f"""
-                    SELECT ICODE, ARTICLENAME, DIVISION, SECTION, DEPARTMENT,
-                           anyLast(STYLE_OR_PATTERN) AS STYLE_OR_PATTERN,
-                           anyLast(SIZE)             AS SIZE,
-                           anyLast(COLOR)            AS COLOR,
-                           SUM(NETAMT)               AS net_sales_amount,
-                           SUM(QTY)                  AS total_qty,
-                           COUNT(DISTINCT BILLNO)    AS bill_count,
-                           round(SUM(MRPAMT) / nullIf(SUM(QTY), 0), 0) AS avg_mrp
-                    FROM `vmart_sales`.`pos_transactional_data`
-                    WHERE toDate(BILLDATE) >= toStartOfMonth(toDate('{date}'))
-                      AND toDate(BILLDATE) <= toDate('{date}')
-                      AND QTY > 0
-                      AND {STORE_F}
-                    GROUP BY ICODE, ARTICLENAME, DIVISION, SECTION, DEPARTMENT
+                    SELECT
+                        p.ICODE, p.ARTICLENAME, p.DIVISION, p.SECTION, p.DEPARTMENT,
+                        anyLast(p.STYLE_OR_PATTERN) AS STYLE_OR_PATTERN,
+                        anyLast(p.SIZE)             AS SIZE,
+                        anyLast(p.COLOR)            AS COLOR,
+                        SUM(p.NETAMT)               AS net_sales_amount,
+                        SUM(p.QTY)                  AS total_qty,
+                        COUNT(DISTINCT p.BILLNO)    AS bill_count,
+                        round(SUM(p.MRPAMT) / nullIf(SUM(p.QTY), 0), 0) AS avg_mrp,
+                        SUM(toFloat64OrZero(inv.SOH)) AS total_soh,
+                        round(SUM(p.QTY) / nullIf(SUM(p.QTY) + SUM(toFloat64OrZero(inv.SOH)), 0) * 100, 1)
+                            AS sell_thru_pct,
+                        round(SUM(toFloat64OrZero(inv.SOH)) / nullIf(SUM(p.QTY) / {days_elapsed}, 0), 0)
+                            AS doi
+                    FROM `vmart_sales`.`pos_transactional_data` p
+                    LEFT JOIN {INV_SUB} inv ON p.ICODE = inv.ICODE
+                    WHERE toDate(p.BILLDATE) >= toStartOfMonth(toDate('{date}'))
+                      AND toDate(p.BILLDATE) <= toDate('{date}')
+                      AND p.QTY > 0
+                      AND {STORE_F_P}
+                    GROUP BY p.ICODE, p.ARTICLENAME, p.DIVISION, p.SECTION, p.DEPARTMENT
                     ORDER BY net_sales_amount DESC
                     LIMIT 25
                 """)
             except Exception as e:
                 logger.warning(f"Supp article query failed: {e}")
 
-            # 2b. Bottom articles — slowest movers (for BOTTOM 10 ARTICLES section)
+            # 2b. Bottom articles — slowest movers + inventory SOH, ST%, DOI
             try:
                 supp["articles_bottom"] = run_query(f"""
-                    SELECT ICODE, ARTICLENAME, DIVISION, SECTION, DEPARTMENT,
-                           anyLast(STYLE_OR_PATTERN) AS STYLE_OR_PATTERN,
-                           anyLast(SIZE)             AS SIZE,
-                           anyLast(COLOR)            AS COLOR,
-                           SUM(NETAMT)               AS net_sales_amount,
-                           SUM(QTY)                  AS total_qty,
-                           COUNT(DISTINCT BILLNO)    AS bill_count,
-                           round(SUM(MRPAMT) / nullIf(SUM(QTY), 0), 0) AS avg_mrp
-                    FROM `vmart_sales`.`pos_transactional_data`
-                    WHERE toDate(BILLDATE) >= toStartOfMonth(toDate('{date}'))
-                      AND toDate(BILLDATE) <= toDate('{date}')
-                      AND QTY > 0
-                      AND {STORE_F}
-                    GROUP BY ICODE, ARTICLENAME, DIVISION, SECTION, DEPARTMENT
+                    SELECT
+                        p.ICODE, p.ARTICLENAME, p.DIVISION, p.SECTION, p.DEPARTMENT,
+                        anyLast(p.STYLE_OR_PATTERN) AS STYLE_OR_PATTERN,
+                        anyLast(p.SIZE)             AS SIZE,
+                        anyLast(p.COLOR)            AS COLOR,
+                        SUM(p.NETAMT)               AS net_sales_amount,
+                        SUM(p.QTY)                  AS total_qty,
+                        COUNT(DISTINCT p.BILLNO)    AS bill_count,
+                        round(SUM(p.MRPAMT) / nullIf(SUM(p.QTY), 0), 0) AS avg_mrp,
+                        SUM(toFloat64OrZero(inv.SOH)) AS total_soh,
+                        round(SUM(p.QTY) / nullIf(SUM(p.QTY) + SUM(toFloat64OrZero(inv.SOH)), 0) * 100, 1)
+                            AS sell_thru_pct,
+                        round(SUM(toFloat64OrZero(inv.SOH)) / nullIf(SUM(p.QTY) / {days_elapsed}, 0), 0)
+                            AS doi
+                    FROM `vmart_sales`.`pos_transactional_data` p
+                    LEFT JOIN {INV_SUB} inv ON p.ICODE = inv.ICODE
+                    WHERE toDate(p.BILLDATE) >= toStartOfMonth(toDate('{date}'))
+                      AND toDate(p.BILLDATE) <= toDate('{date}')
+                      AND p.QTY > 0
+                      AND {STORE_F_P}
+                    GROUP BY p.ICODE, p.ARTICLENAME, p.DIVISION, p.SECTION, p.DEPARTMENT
                     ORDER BY net_sales_amount ASC
                     LIMIT 25
                 """)
             except Exception as e:
                 logger.warning(f"Supp articles_bottom query failed: {e}")
 
-            # 3. Peak hours — latest day per store/hour with bill + mobile customer counts
+            # 3. Peak hours — latest day per store/hour: bills, mobile uniques, sales, qty
             try:
                 supp["peak_hours"] = run_query(f"""
                     SELECT STORE_ID, SHRTNAME, ZONE, REGION,
-                           toHour(BILLDATE)               AS hour,
-                           COUNT(DISTINCT BILLNO)         AS txn_count,
-                           COUNT(DISTINCT CUSTOMER_MOBILE) AS unique_customers,
-                           SUM(NETAMT)                    AS net_sales_amount,
-                           SUM(QTY)                       AS total_qty
+                           toHour(BILLDATE)                                    AS hour,
+                           COUNT(DISTINCT BILLNO)                              AS txn_count,
+                           countIf(CUSTOMER_MOBILE != '' AND CUSTOMER_MOBILE IS NOT NULL,
+                                   CUSTOMER_MOBILE)                            AS unique_customers,
+                           SUM(NETAMT)                                         AS net_sales_amount,
+                           SUM(QTY)                                            AS total_qty
                     FROM `vmart_sales`.`pos_transactional_data`
                     WHERE toDate(BILLDATE) = toDate('{date}')
                       AND {STORE_F}
@@ -1253,9 +1347,26 @@ class PipelineOrchestrator:
                     LIMIT 500
                 """)
             except Exception as e:
-                logger.warning(f"Supp peak hours query failed: {e}")
+                # fallback without countIf for mobile
+                try:
+                    supp["peak_hours"] = run_query(f"""
+                        SELECT STORE_ID, SHRTNAME, ZONE, REGION,
+                               toHour(BILLDATE)               AS hour,
+                               COUNT(DISTINCT BILLNO)         AS txn_count,
+                               COUNT(DISTINCT CUSTOMER_MOBILE) AS unique_customers,
+                               SUM(NETAMT)                    AS net_sales_amount,
+                               SUM(QTY)                       AS total_qty
+                        FROM `vmart_sales`.`pos_transactional_data`
+                        WHERE toDate(BILLDATE) = toDate('{date}')
+                          AND {STORE_F}
+                        GROUP BY STORE_ID, SHRTNAME, ZONE, REGION, hour
+                        ORDER BY STORE_ID, txn_count DESC
+                        LIMIT 500
+                    """)
+                except Exception as e2:
+                    logger.warning(f"Supp peak hours query failed: {e2}")
 
-            # 4. Top 7 highest MRP articles — MTD
+            # 4. Top 7 highest MRP articles — MTD + SOH, ST%, DOI
             try:
                 supp["top_mrp"] = run_query(f"""
                     SELECT p.ICODE, p.ARTICLENAME, p.DIVISION, p.SECTION, p.DEPARTMENT,
@@ -1265,7 +1376,12 @@ class PipelineOrchestrator:
                            anyLast(toFloat64OrNull(v.MRP)) AS unit_mrp,
                            SUM(p.NETAMT)               AS net_sales_amount,
                            SUM(p.QTY)                  AS total_qty,
-                           COUNT(DISTINCT p.BILLNO)    AS bill_count
+                           COUNT(DISTINCT p.BILLNO)    AS bill_count,
+                           SUM(toFloat64OrZero(inv.SOH)) AS total_soh,
+                           round(SUM(p.QTY) / nullIf(SUM(p.QTY) + SUM(toFloat64OrZero(inv.SOH)), 0) * 100, 1)
+                               AS sell_thru_pct,
+                           round(SUM(toFloat64OrZero(inv.SOH)) / nullIf(SUM(p.QTY) / {days_elapsed}, 0), 0)
+                               AS doi
                     FROM `vmart_sales`.`pos_transactional_data` p
                     LEFT JOIN (
                         SELECT ICODE, anyLast(toFloat64OrNull(MRP)) AS MRP
@@ -1273,6 +1389,7 @@ class PipelineOrchestrator:
                         WHERE toFloat64OrNull(MRP) > 0
                         GROUP BY ICODE
                     ) v ON p.ICODE = v.ICODE
+                    LEFT JOIN {INV_SUB} inv ON p.ICODE = inv.ICODE
                     WHERE toDate(p.BILLDATE) >= toStartOfMonth(toDate('{date}'))
                       AND toDate(p.BILLDATE) <= toDate('{date}')
                       AND p.QTY > 0
