@@ -281,6 +281,54 @@ PEAK_HOURS_KEYWORDS = {
     "busiest hour", "busiest time",
 }
 
+# ─── Zone Mapping ──────────────────────────────────────────────────────────────
+# DB ZONE column values (exact, case-sensitive): 'UP East', 'North', 'East/JHK', 'South', 'Bihar'
+# Longest entries first so we always match the most specific phrase first.
+
+ZONE_ALIASES: list[tuple[str, str]] = [
+    # UP East (match before bare "up" or "east")
+    ("up east zone",  "UP East"),
+    ("up east",       "UP East"),
+    ("up zone",       "UP East"),
+    # North
+    ("north zone",    "North"),
+    ("north",         "North"),
+    # East / JHK
+    ("east/jhk zone", "East/JHK"),
+    ("east/jhk",      "East/JHK"),
+    ("east jhk zone", "East/JHK"),
+    ("east jhk",      "East/JHK"),
+    ("jhk zone",      "East/JHK"),
+    ("jhk",           "East/JHK"),
+    ("jharkhand",     "East/JHK"),
+    ("east zone",     "East/JHK"),
+    # South
+    ("south zone",    "South"),
+    ("south",         "South"),
+    # Bihar
+    ("bihar zone",    "Bihar"),
+    ("bihar",         "Bihar"),
+]
+
+# Bare "up" is ambiguous — only match if followed by zone/east or standalone zone context
+_UP_PATTERN = re.compile(r'\bup\s+(zone|east)\b', re.IGNORECASE)
+
+
+def extract_zone(text: str) -> dict:
+    """
+    Extract zone filter from query text.
+    Returns {'zone': 'UP East', 'sql': "ZONE = 'UP East'"} or {} if no zone found.
+    Tries longest alias match first.
+    """
+    t = text.lower().strip()
+    for phrase, zone_val in ZONE_ALIASES:
+        if phrase in t:
+            return {"zone": zone_val, "sql": f"ZONE = '{zone_val}'"}
+    # Extra check: bare "up" with zone/east nearby
+    if _UP_PATTERN.search(t):
+        return {"zone": "UP East", "sql": "ZONE = 'UP East'"}
+    return {}
+
 
 _MONTH_MAP = {
     "jan": "01", "january": "01",
@@ -431,16 +479,23 @@ def normalize_query(raw: str) -> dict:
     # ── 5. Extract specific target date (highest priority for SQL generation) ─
     target_date = extract_target_date(raw)   # check raw — preserves original case/format
 
+    # ── 6. Extract zone filter ────────────────────────────────────────────────
+    # Check normalized text first, then original (handles abbreviation-expanded forms)
+    zone_filter = extract_zone(text) or extract_zone(raw)
+
     if corrections:
         logger.info(f"Query normalized: '{raw}' → '{text}' | fixes={len(corrections)}")
     if target_date:
         logger.info(f"Query target_date extracted: {target_date}")
+    if zone_filter:
+        logger.info(f"Query zone_filter extracted: {zone_filter}")
 
     return {
         "original":    raw,
         "normalized":  text,
         "corrections": corrections,
         "target_date": target_date,
+        "zone_filter": zone_filter,
         "flags":       flags,
     }
 

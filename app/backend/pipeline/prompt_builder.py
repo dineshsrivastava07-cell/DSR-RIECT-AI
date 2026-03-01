@@ -18,6 +18,16 @@ ANALYTICAL_SYSTEM_ADDENDUM = """
 ENTERPRISE RESPONSE PROTOCOL — FOLLOW WITHOUT DEVIATION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+UNIVERSAL COMPLETENESS MANDATE (applies to ALL responses):
+- NEVER say "data not available for [zone/region/store] stores" — if data exists in DATA RETRIEVED, show it ALL
+- NEVER say "Note: Data not available for additional stores beyond those listed"
+- NEVER truncate store lists — show EVERY store that appears in DATA RETRIEVED
+- If user specified a ZONE (e.g. "UP Zone", "North Zone", "Bihar") → show ONLY stores of that zone
+  • Verify ZONE column value for each store — exclude stores with wrong zone
+  • UP Zone = ZONE 'UP East' only. North Zone = ZONE 'North' only. East Zone = ZONE 'East/JHK' only.
+- If response length is long: split into PART 1 (first 40 stores) then immediately output PART 2
+  Format: "[ PART 1 of 2 — Continuing immediately... ]" then PART 2 — NEVER ask user to prompt again
+
 DETECT QUERY TYPE AND APPLY THE CORRECT FORMAT:
 
 ══ FORMAT A — RAW DATA REQUEST ══════════════════════════
@@ -181,7 +191,15 @@ TOP 3 ACTIONS PER P1/P2 ANOMALY STORE:
   2. 🟠 Short-term (this week): [owner] — [e.g. "Category team identifies markdown candidates, target [%]"]
   3. 🟡 Recovery (this month): [metric target, e.g. "Reduce DOI from [X]d to <30d / raise ST% from [Y]% to >60%"]
 
-SECTION 7 — PEAK HOURS ANALYSIS (ALWAYS include — data is in SUPPLEMENTARY DATA block)
+SECTION 7 — PEAK HOURS ANALYSIS (ALWAYS include — data is in DATA RETRIEVED or SUPPLEMENTARY DATA block)
+
+⚠ ZONE COMPLETENESS MANDATE (CRITICAL — ALWAYS apply):
+- NEVER write "Data not available for additional [zone] stores" — ALL requested stores MUST appear
+- NEVER write "Note: Data not available..." for any zone — this is a critical failure
+- VERIFY: Before showing any store, confirm its ZONE column matches the user's requested zone
+- If a store's ZONE = 'East/JHK' or 'North' or 'Bihar' or 'South' and user asked for 'UP East' → EXCLUDE that store
+- STRICT ZONE RULE: Only include stores where ZONE exactly equals the requested zone value
+- If total store count > 40: Output PART 1 (stores 1–40), then write "[ PART 1 of 2 — Continuing... ]" and immediately output PART 2 (stores 41+) in the same response — NEVER truncate
 
 COLUMN MAPPINGS for peak hours data:
   txn_count = COUNT(DISTINCT BILLNO) = number of unique bills/transactions (Transactions column)
@@ -192,18 +210,19 @@ COLUMN MAPPINGS for peak hours data:
   ATV per store = net_sales_amount ÷ txn_count — COMPUTE INLINE (NEVER N/A if both columns present)
   Unique Customers (Mobile) = unique_customers column — NEVER N/A (use 0 if value is 0)
 
-Use PEAK HOURS CHAIN SUMMARY block from supplementary data:
+Use PEAK HOURS CHAIN SUMMARY block from supplementary data (or from DATA RETRIEVED if route=PEAK_HOURS):
 | Time Slot | Transactions | Unique Cust (Mobile) | Revenue | Avg Bill Value | Stores Active |
 → Time Slot = "HH:00–HH:59" format (e.g., 11:00–11:59)
 → Unique Cust (Mobile) = unique_customers column per hour — if 0 for a slot, show 0, NOT N/A
 → Avg Bill Value = net_sales_amount ÷ txn_count per hour slot
 
-Show ALL stores in Store Peak Table:
+Show ALL stores in Store Peak Table (EVERY store in data — NEVER omit any):
 | Store | Region | Zone | Peak Slot | 2nd Peak | 3rd Peak | Total Bills | Unique Cust (Mobile) | Revenue | UPT | ATV |
 → UPT = total_qty ÷ txn_count per store row — COMPUTE INLINE, NEVER N/A
 → ATV = net_sales_amount ÷ txn_count per store row — COMPUTE INLINE, NEVER N/A
 → Unique Cust (Mobile) = unique_customers — if column present, NEVER N/A
 → 5 actionable insight bullets: peak staffing slot, floor replenishment window, mobile CRM opportunity (if unique_customers > 0), promotion launch window, slow-hour intervention
+→ If response is long: split into PART 1 / PART 2 in-line — NEVER drop stores
 
 SECTION 8 — PRIORITY ACTIONS
 Numbered list. Format per item:
@@ -709,6 +728,18 @@ def build_analysis_prompt(
     kpi_types = intent.get("kpi_types", [])
     if kpi_types:
         parts.append(f"Analysis focus: {intent_label} | KPIs: {', '.join(kpi_types)}")
+        parts.append("")
+
+    # Zone filter context — tells the LLM which zone was requested so it can verify rows
+    zone_filter = context.get("zone_filter", {})
+    if zone_filter:
+        zone_val = zone_filter.get("zone", "")
+        parts.append(
+            f"⚠ ZONE FILTER ACTIVE: User requested '{zone_val}' zone only.\n"
+            f"CRITICAL: Only include stores where ZONE = '{zone_val}' in ALL tables and outputs.\n"
+            f"If any store row has ZONE ≠ '{zone_val}' → EXCLUDE it immediately.\n"
+            f"NEVER write 'data not available for {zone_val} stores' — show ALL matching rows."
+        )
         parts.append("")
 
     parts.append(f"USER QUESTION: {query}")

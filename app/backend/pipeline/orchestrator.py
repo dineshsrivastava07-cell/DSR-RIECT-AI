@@ -191,6 +191,7 @@ class PipelineOrchestrator:
         decision.intent["norm_corrections"] = correction_summary(norm_result)
         decision.intent["norm_flags"]       = norm_flags
         decision.intent["target_date"]      = norm_result.get("target_date", "")
+        decision.intent["zone_filter"]      = norm_result.get("zone_filter", {})
 
         # 2. Check LLM capability — honour user's preferred model first
         from llm.ollama_client import is_available as ollama_check
@@ -564,6 +565,12 @@ class PipelineOrchestrator:
         # Triggered only when: main query succeeded + KPI/DATA route + ≥3 rows returned.
         # These feed Sections 4, 5, 7 of the analytical prompt (always present now).
         supplementary_data: dict = {}
+
+        # Inject zone_filter from intent into context so supplementary queries respect zone
+        _zone_filter = decision.intent.get("zone_filter", {})
+        if _zone_filter:
+            context["zone_filter"] = _zone_filter
+
         _supp_routes = (Route.KPI_ANALYSIS, Route.DATA_QUERY, Route.TREND_ANALYSIS)
         if (
             decision.route in _supp_routes
@@ -833,18 +840,33 @@ class PipelineOrchestrator:
             # Check norm flags for specialised queries first
             norm_flags = decision.intent.get("norm_flags", {})
             if norm_flags.get("has_peak_hours"):
+                _zone_f2   = decision.intent.get("zone_filter", {})
+                _zone_sql2 = _zone_f2.get("sql", "")
+                _zone_val2 = _zone_f2.get("zone", "")
+                _zone_and2 = f"\n  AND {_zone_sql2}" if _zone_sql2 else ""
+                _zone_lim2 = "2000" if _zone_sql2 else "500"
+                _zone_m2   = (
+                    f"MANDATORY ZONE FILTER: AND {_zone_sql2} MUST be in WHERE clause. "
+                    f"Only '{_zone_val2}' zone stores. "
+                ) if _zone_sql2 else ""
                 ctx["sql_hints"] = (
                     "PEAK HOURS ANALYSIS — extract hour from BILLDATE using toHour(). "
-                    "SELECT STORE_ID, SHRTNAME, toHour(BILLDATE) AS hour, "
+                    "ALWAYS include ZONE and REGION in SELECT and GROUP BY. "
+                    "SELECT STORE_ID, SHRTNAME, ZONE, REGION, toHour(BILLDATE) AS hour, "
                     "  COUNT(DISTINCT BILLNO) AS txn_count, "
                     "  SUM(NETAMT) AS revenue, "
                     "  SUM(QTY) AS qty "
                     "FROM vmart_sales.pos_transactional_data "
                     f"WHERE toDate(BILLDATE) = toDate('{latest_sales}') "
-                    "GROUP BY STORE_ID, SHRTNAME, hour "
-                    "ORDER BY SHRTNAME, txn_count DESC LIMIT 500. "
+                    "  AND STORE_ID IN (SELECT CODE FROM vmart_sales.stores WHERE ACTIVE = 'TRUE') "
+                    f"{_zone_and2} "
+                    "GROUP BY STORE_ID, SHRTNAME, ZONE, REGION, hour "
+                    "ORDER BY STORE_ID, hour ASC "
+                    f"LIMIT {_zone_lim2}. "
+                    f"{_zone_m2}"
                     "NEVER join inventory. NEVER use today(). NEVER use toDateTime()."
                 )
+                ctx["zone_filter"] = _zone_f2
             elif norm_flags.get("has_pilferage"):
                 ctx["sql_hints"] = (
                     "PILFERAGE ANALYSIS: Use pos_transactional_data columns: "
@@ -923,25 +945,39 @@ class PipelineOrchestrator:
                 )
 
         elif decision.route == Route.PEAK_HOURS:
+            _zone_f   = decision.intent.get("zone_filter", {})
+            _zone_sql = _zone_f.get("sql", "")    # e.g. "ZONE = 'UP East'"
+            _zone_val = _zone_f.get("zone", "")   # e.g. "UP East"
+            _zone_and = f"\n  AND {_zone_sql}" if _zone_sql else ""
+            _zone_limit = "2000" if _zone_sql else "500"
+            _zone_mandate = (
+                f"MANDATORY ZONE FILTER: The user asked for '{_zone_val}' zone stores only. "
+                f"SQL MUST include: AND {_zone_sql}. "
+                f"STRICT RULE: Do NOT include any store with ZONE != '{_zone_val}'. "
+                f"VERIFY: Before returning SQL, confirm WHERE clause contains 'ZONE = \\'{_zone_val}\\''. "
+            ) if _zone_sql else ""
             ctx["sql_hints"] = (
-                "PEAK HOURS ANALYSIS — extract hour from BILLDATE. "
+                "PEAK HOURS ANALYSIS — extract hour from BILLDATE using toHour(). "
+                "ALWAYS include ZONE and REGION in SELECT and GROUP BY (required for zone reporting). "
                 "Required SQL: "
-                "SELECT STORE_ID, SHRTNAME, toHour(BILLDATE) AS hour, "
+                "SELECT STORE_ID, SHRTNAME, ZONE, REGION, toHour(BILLDATE) AS hour, "
                 "  COUNT(DISTINCT BILLNO) AS txn_count, "
                 "  SUM(NETAMT) AS revenue, "
                 "  SUM(QTY) AS qty "
                 "FROM vmart_sales.pos_transactional_data "
                 f"WHERE toDate(BILLDATE) = toDate('{latest_sales}') "
-                "GROUP BY STORE_ID, SHRTNAME, hour "
-                "ORDER BY SHRTNAME, txn_count DESC "
-                "LIMIT 500. "
-                "This returns one row per (store, hour) — the pipeline summarises peak hours per store. "
-                "If user asks store-wise: add SHRTNAME to GROUP BY. "
-                "If user asks chain-wide only: remove SHRTNAME from GROUP BY and SELECT. "
+                "  AND STORE_ID IN (SELECT CODE FROM vmart_sales.stores WHERE ACTIVE = 'TRUE') "
+                f"{_zone_and} "
+                "GROUP BY STORE_ID, SHRTNAME, ZONE, REGION, hour "
+                "ORDER BY STORE_ID, hour ASC "
+                f"LIMIT {_zone_limit}. "
+                f"{_zone_mandate}"
                 "NEVER join inventory tables for peak hours. "
                 "NEVER use toDateTime() — always toDate() for date filters. "
-                "NEVER use today() — always use toDate('{latest_sales}')."
+                f"NEVER use today() — always use toDate('{latest_sales}'). "
+                "NEVER say 'data not available' — fetch all matching stores."
             )
+            ctx["zone_filter"] = _zone_f   # carry forward for prompt_builder
 
         elif decision.route == Route.TREND_ANALYSIS:
             ctx["sql_hints"] = (
@@ -1222,6 +1258,12 @@ class PipelineOrchestrator:
 
         from clickhouse.query_runner import run_query
 
+        # Zone filter (injected from query_normalizer via decide() → execute() → context)
+        _zone_ctx    = context.get("zone_filter", {})
+        _zone_raw    = _zone_ctx.get("sql", "")   # e.g. "ZONE = 'UP East'"
+        _zone_clause = f"  AND {_zone_raw}" if _zone_raw else ""
+        _peak_limit  = 2000 if _zone_raw else 500  # Higher limit for zone-scoped queries
+
         # ── store_inventory: SHRTNAME, ZONE, REGION come from pos_transactional_data (NOT stores)
         # stores table has STORE_NAME not SHRTNAME. Fetching SHRTNAME from stores caused
         # ClickHouse "unknown identifier" error → query returned {} → no STORE INVENTORY BLOCK.
@@ -1359,9 +1401,10 @@ class PipelineOrchestrator:
             FROM `vmart_sales`.`pos_transactional_data`
             WHERE toDate(BILLDATE) = toDate('{date}')
               AND {STORE_F}
+{_zone_clause}
             GROUP BY STORE_ID, SHRTNAME, ZONE, REGION, hour
             ORDER BY STORE_ID, txn_count DESC
-            LIMIT 500
+            LIMIT {_peak_limit}
         """
 
         sql_peak_hours_fallback = f"""
@@ -1374,9 +1417,10 @@ class PipelineOrchestrator:
             FROM `vmart_sales`.`pos_transactional_data`
             WHERE toDate(BILLDATE) = toDate('{date}')
               AND {STORE_F}
+{_zone_clause}
             GROUP BY STORE_ID, SHRTNAME, ZONE, REGION, hour
             ORDER BY STORE_ID, txn_count DESC
-            LIMIT 500
+            LIMIT {_peak_limit}
         """
 
         sql_top_mrp = f"""
