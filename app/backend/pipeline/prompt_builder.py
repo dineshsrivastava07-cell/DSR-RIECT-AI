@@ -209,8 +209,15 @@ SECTION 9 — EXECUTIVE CONCLUSION & OVERALL SUMMARY
   4. [Action 4] ...
   5. [Action 5] ...
 
-🔮 30-DAY OUTLOOK
-  [1–2 sentences: If current pattern continues → what happens to SPSF/ST%/DOI. What inflection point to watch.]
+🔮 30-DAY OUTLOOK (use LAST 30 DAYS DAILY TREND block from SUPPLEMENTARY DATA — mandatory)
+  Base: Total 30-day sales=₹[X from last_30_days total], Avg daily=₹[Y], Peak day=[date ₹Z]
+  SPSF Trend: [compute from avg_daily ÷ active_stores ÷ chain_avg_sqft or use chain-level]
+  Projection: At current [avg daily ₹X]: Month target ₹[Y] = [on-track/at-risk/critical]
+  KPI Watch: ST%=[current]% → if sales velocity holds, ST%=[projected]% by [date]
+  DOI Watch: DOI=[current]d → at current sell rate: reaches ₹[level] by [date]
+  Risk: [specific risk with date, e.g. "If Wk4 sales drop >15%, chain misses ₹Xk target"]
+  Action: [1 specific action for next 30 days with owner and metric]
+  NEVER write "30-Day data not available" — always use LAST 30 DAYS DAILY TREND block.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ══ FORMAT C — INSIGHT / STRATEGY REQUEST ════════════════
@@ -242,6 +249,15 @@ KPI CHAIN SUMMARIES — read from injected blocks:
 - Sell-Through avg → SELL-THROUGH CHAIN SUMMARY
 - UPT avg → UPT CHAIN SUMMARY
 - Per-store view → PER-STORE CROSS-KPI VIEW
+
+DATE-SPECIFIC QUERY RULES (CRITICAL — NEVER say "data not available" for dates in range):
+- If the user asks for a specific date (e.g. "25 Feb", "2026-02-25"):
+  → The SQL has already filtered to that exact date
+  → Data in the prompt IS for that date — use it, do NOT say it's unavailable
+  → NEVER say "daily data not available" or "only aggregated views available"
+  → Report exactly: "Data for [date]: Net Sales=₹[X], Bills=[Y], Stores=[N]..."
+- If the data block is empty for a date: state "No transactions found for [date]" (not "unavailable")
+- Known data range: Feb 1–28, 2026 — any date in this range WILL have data
 
 SELL-THROUGH:
 - Thresholds: P1<60%, P2<80%, P3<95%, target=95%
@@ -301,7 +317,9 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
         total_soh = sum(float(r.get("total_soh") or 0) for r in data)
         avg_st = sum(float(r.get("sell_thru_pct") or 0) for r in data) / max(len(data), 1)
         avg_doi = sum(float(r.get("doi") or 0) for r in data) / max(len(data), 1)
-        display_rows = data[:20]  # Cap: top 10 + bottom 10 coverage is sufficient
+        # 60 rows: covers Top 10 + Bottom 10 + all mid-range stores the LLM might reference
+        # (was 20 — too few, high-ST% stores like top performers were missing)
+        display_rows = data[:60]
         sections.append(
             f"═══ STORE INVENTORY BLOCK ({date_label}) — {len(data)} stores "
             f"| Chain SOH={total_soh:,.0f} units | Chain Avg ST%={avg_st:.1f}% | Chain Avg DOI={avg_doi:.0f}d ═══"
@@ -444,6 +462,36 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
             "  ↑ Use for SECTION 5 TOP 7 HIGHEST SELLING MRP. "
             "unit_mrp=MRP, total_qty=Qty, sell_thru_pct=ST%, doi=DOI."
         )
+        sections.append("═" * 75)
+
+    # ── Last 30 Days Daily Trend ─────────────────────────────────────────────
+    last30 = supplementary_data.get("last_30_days", {})
+    if last30.get("data") and last30.get("columns"):
+        data, cols = last30["data"], last30["columns"]
+        total_sales_30 = sum(float(r.get("net_sales", 0) or 0) for r in data)
+        total_bills_30 = sum(int(r.get("bills", 0) or 0) for r in data)
+        avg_daily = total_sales_30 / max(len(data), 1)
+        peak_day  = max(data, key=lambda r: float(r.get("net_sales", 0) or 0), default={})
+        low_day   = min(data, key=lambda r: float(r.get("net_sales", 0) or 0), default={})
+        sections.append(
+            f"═══ LAST 30 DAYS DAILY TREND (to {latest_sales_date}) — {len(data)} days ═══"
+        )
+        sections.append(
+            f"  30-Day Total: ₹{total_sales_30:,.0f} | Bills: {total_bills_30:,} | "
+            f"Avg Daily: ₹{avg_daily:,.0f}"
+        )
+        sections.append(
+            f"  Peak Day: {peak_day.get('dt','')} ₹{float(peak_day.get('net_sales',0) or 0):,.0f} | "
+            f"Lowest Day: {low_day.get('dt','')} ₹{float(low_day.get('net_sales',0) or 0):,.0f}"
+        )
+        sections.append(
+            "  USE THIS for SECTION 9 → 30-DAY OUTLOOK: compute SPSF trend, sales velocity,"
+            " weekend vs weekday patterns, and project next 30 days."
+        )
+        sections.append("  dt | net_sales(₹) | total_qty | bills | active_stores | atv(₹) | upt")
+        sections.append("-" * 80)
+        for row in data:
+            sections.append(" | ".join(str(row.get(c, "")) for c in cols))
         sections.append("═" * 75)
 
     return "\n".join(sections) if sections else ""

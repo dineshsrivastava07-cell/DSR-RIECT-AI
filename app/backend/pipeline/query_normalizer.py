@@ -342,6 +342,20 @@ def extract_target_date(text: str) -> str:
     if m:
         return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
 
+    # Pattern: DD Mon (no year) — e.g. "25 Feb", "25th Feb"  → infer year 2026
+    m = re.search(r'\b(\d{1,2})(?:st|nd|rd|th)?\s+(' + _MON_PAT + r')\b', t)
+    if m:
+        mon = MONTH_MAP_get(m.group(2))
+        if mon:
+            return f"2026-{mon}-{int(m.group(1)):02d}"
+
+    # Pattern: Mon DD (no year) — e.g. "Feb 25", "February 25"  → infer year 2026
+    m = re.search(r'\b(' + _MON_PAT + r')\s+(\d{1,2})(?:st|nd|rd|th)?\b', t)
+    if m:
+        mon = MONTH_MAP_get(m.group(1))
+        if mon:
+            return f"2026-{mon}-{int(m.group(2)):02d}"
+
     return ""
 
 

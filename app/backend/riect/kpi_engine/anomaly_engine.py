@@ -483,55 +483,194 @@ def _get_dimension(df: pd.DataFrame, idx) -> str:
 
 
 def format_anomalies_for_prompt(anomaly_result: dict) -> str:
-    """Format all anomaly types for LLM prompt injection — structured by category."""
+    """
+    Format all anomaly types for LLM prompt injection.
+    Detailed, store-wise, KPI-wise — grouped by severity (P1→P2) then KPI.
+    Each record includes: store, actual value, chain avg, gap, z-score, action.
+    """
     anomalies = anomaly_result.get("anomalies", [])
     if not anomalies:
         return "No anomalies detected."
 
+    total   = len(anomalies)
+    p1_cnt  = anomaly_result.get("p1_anomalies", 0)
+    p2_cnt  = anomaly_result.get("p2_anomalies", 0)
+    pil_cnt = anomaly_result.get("pilferage_count", 0)
+    dsc_cnt = anomaly_result.get("discount_anom_count", 0)
+    ret_cnt = anomaly_result.get("return_count", 0)
+
     lines = [
-        f"ANOMALY DETECTION REPORT — {len(anomalies)} findings "
-        f"({anomaly_result.get('p1_anomalies', 0)} P1-Critical, "
-        f"{anomaly_result.get('p2_anomalies', 0)} P2-High):"
+        f"╔══ ANOMALY DETECTION REPORT — {total} FINDINGS ══╗",
+        f"  P1-CRITICAL: {p1_cnt}  |  P2-HIGH: {p2_cnt}  |  "
+        f"Pilferage: {pil_cnt}  |  Discount Fraud: {dsc_cnt}  |  Returns: {ret_cnt}",
+        f"{'─'*60}",
     ]
 
-    # Group by type for clarity
-    type_order = ["pilferage", "discount_anomaly", "sales_return", "statistical_outlier"]
-    type_labels = {
-        "pilferage":         "PILFERAGE / BILL INTEGRITY",
-        "discount_anomaly":  "DISCOUNT ANOMALIES",
-        "sales_return":      "SALES RETURNS",
-        "statistical_outlier": "STATISTICAL OUTLIERS",
+    # ── KPI metadata for formatting ────────────────────────────────────────
+    KPI_META = {
+        "SPSF":      {"unit": "₹",   "label": "Sales Per Sq Ft",     "target": "≥ ₹1,000",  "action": "Review staffing, product mix, floor productivity. Activate IST pull plan."},
+        "SELL_THRU": {"unit": "%",   "label": "Sell-Through %",       "target": "≥ 95%",     "action": "Trigger markdown/promo for ageing stock. Check replenishment gaps."},
+        "UPT":       {"unit": "",    "label": "Units Per Transaction", "target": "Higher better", "action": "Train staff on cross-sell. Review display and bundling strategy."},
+        "DOI":       {"unit": " days","label": "Days of Inventory",   "target": "Minimise",   "action": "Reduce intake. Trigger inter-store transfer or markdown to clear stock."},
+        "SALES":     {"unit": "₹",   "label": "Net Sales",            "target": "Chain avg+", "action": "Investigate footfall drop, store ops issues, local competition."},
+        "SOH":       {"unit": " units","label": "Stock on Hand",      "target": "Balanced",   "action": "Review replenishment policy. Avoid overstock and stock-out."},
+        "PILFERAGE": {"unit": "₹",   "label": "Bill Integrity Breach","target": "100% integrity", "action": "ESCALATE to Loss Prevention. Suspend staff pending audit."},
+        "DISCOUNT":  {"unit": "%",   "label": "Discount Anomaly",     "target": "≤ 5% non-promo", "action": "AUDIT: Pull all discount logs. Verify authorization chain."},
+        "RETURNS":   {"unit": "₹",   "label": "Sales Return",         "target": "≤ 5% return rate", "action": "Review return policy compliance. Check for fraud or defect pattern."},
     }
 
-    grouped: dict[str, list] = {t: [] for t in type_order}
-    for a in anomalies:
-        t = a.get("type", "statistical_outlier")
-        grouped.setdefault(t, []).append(a)
+    def _fmt_value(val, kpi: str) -> str:
+        meta = KPI_META.get(kpi, {})
+        unit = meta.get("unit", "")
+        if unit == "₹":
+            return f"₹{val:,.2f}"
+        elif unit == "%":
+            return f"{val:.1f}%"
+        elif unit == " days":
+            return f"{val:.0f} days"
+        elif unit == " units":
+            return f"{val:,.0f} units"
+        return str(val)
 
-    for atype in type_order:
-        group = grouped.get(atype, [])
+    def _gap_str(val, mean, kpi: str) -> str:
+        """Return gap vs chain average with direction indicator."""
+        if mean is None or mean == 0:
+            return ""
+        gap = val - mean
+        pct = (gap / abs(mean)) * 100
+        arrow = "▼" if gap < 0 else "▲"
+        return f"{arrow}{abs(pct):.1f}% vs chain avg"
+
+    # ── Group by severity → then KPI ──────────────────────────────────────
+    sev_order = ["P1", "P2", "P3"]
+    sev_labels = {
+        "P1": "🔴 P1-CRITICAL — Immediate Action Required",
+        "P2": "🟠 P2-HIGH — Action Within 24–48 Hours",
+        "P3": "🟡 P3-MEDIUM — Monitor and Plan",
+    }
+
+    grouped_by_sev: dict[str, list] = {"P1": [], "P2": [], "P3": []}
+    for a in anomalies:
+        sev = a.get("severity", "P2")
+        grouped_by_sev.setdefault(sev, []).append(a)
+
+    for sev in sev_order:
+        group = grouped_by_sev.get(sev, [])
         if not group:
             continue
-        lines.append(f"\n  ▶ {type_labels.get(atype, atype)} ({len(group)} found):")
-        for a in group[:8]:
-            sev = a.get("severity", "P2")
-            desc = a.get("description", "")
-            lines.append(f"    [{sev}] {desc}")
-        if len(group) > 8:
-            lines.append(f"    ... {len(group)-8} more")
 
-    # Summary counts
-    pil = anomaly_result.get("pilferage_count", 0)
-    dsc = anomaly_result.get("discount_anom_count", 0)
-    ret = anomaly_result.get("return_count", 0)
+        lines.append(f"\n{sev_labels[sev]} ({len(group)} stores/signals)")
+        lines.append("─" * 56)
 
-    if pil + dsc + ret > 0:
+        # Sub-group by KPI within each severity
+        kpi_grouped: dict[str, list] = {}
+        for a in group:
+            k = a.get("kpi", "OTHER")
+            kpi_grouped.setdefault(k, []).append(a)
+
+        for kpi, kpi_items in kpi_grouped.items():
+            meta   = KPI_META.get(kpi, {"label": kpi, "target": "—", "action": "Investigate."})
+            lines.append(f"\n  ▶ {meta['label']} ({kpi}) — {len(kpi_items)} signal(s) | Target: {meta['target']}")
+
+            for a in kpi_items[:20]:   # cap at 20 per KPI per severity
+                dim   = a.get("dimension", "Unknown")
+                val   = a.get("value")
+                mean  = a.get("mean")
+                z     = a.get("z_score")
+                atype = a.get("type", "statistical_outlier")
+
+                # Build the detail line based on anomaly type
+                if atype == "statistical_outlier":
+                    val_str  = _fmt_value(val, kpi) if val is not None else "N/A"
+                    mean_str = _fmt_value(mean, kpi) if mean is not None else "N/A"
+                    gap_str  = _gap_str(val, mean, kpi) if (val is not None and mean is not None) else ""
+                    z_str    = f"  z={z:+.2f}σ" if z is not None else ""
+                    lines.append(
+                        f"    • {dim:<30}  Actual={val_str}  ChainAvg={mean_str}"
+                        f"  {gap_str}{z_str}"
+                    )
+
+                elif atype == "pilferage":
+                    integ   = a.get("integrity_score", val)
+                    leakage = a.get("leakage_amt", 0)
+                    net_v   = a.get("netamt", "N/A")
+                    exp_v   = a.get("expected_netamt", "N/A")
+                    lines.append(
+                        f"    • {dim:<30}  Integrity={integ:.1%}  Leakage=₹{leakage:,.2f}"
+                        f"  (NETAMT=₹{net_v:,.2f} vs Expected=₹{exp_v:,.2f})"
+                    )
+
+                elif atype == "discount_anomaly":
+                    disc_rate   = a.get("disc_rate_pct", val)
+                    non_promo   = a.get("non_promo_rate_pct")
+                    chain_avg   = a.get("mean_rate_pct")
+                    disc_amt    = a.get("discountamt", "?")
+                    gross_v     = a.get("grossamt", "?")
+                    detail      = f"DiscRate={disc_rate:.1f}%"
+                    if non_promo is not None:
+                        detail += f"  NonPromo={non_promo:.1f}%"
+                    if chain_avg is not None:
+                        detail += f"  ChainAvg={chain_avg:.1f}%"
+                    lines.append(
+                        f"    • {dim:<30}  {detail}"
+                        f"  (DISC=₹{disc_amt:,.2f}  GROSS=₹{gross_v:,.2f})"
+                    )
+
+                elif atype == "sales_return":
+                    ret_rate  = a.get("return_rate_pct", 0)
+                    ret_amt   = a.get("total_return_amt") or a.get("value", 0)
+                    sales_amt = a.get("total_sales_amt")
+                    qty_str   = ""
+                    if a.get("total_return_qty") is not None:
+                        qty_str = f"  ReturnUnits={a['total_return_qty']:,}"
+                    sales_str = f"  Sales=₹{sales_amt:,.2f}" if sales_amt else ""
+                    lines.append(
+                        f"    • {dim:<30}  ReturnRate={ret_rate:.1f}%"
+                        f"  ReturnAmt=₹{abs(ret_amt):,.2f}{sales_str}{qty_str}"
+                    )
+
+                else:
+                    # Fallback — use existing description
+                    lines.append(f"    • {dim}: {a.get('description', '')}")
+
+            if len(kpi_items) > 20:
+                lines.append(f"    ... {len(kpi_items)-20} more {kpi} signals")
+
+            # Recommended action for this KPI
+            lines.append(f"    → ACTION: {meta['action']}")
+
+    # ── KPI-wise summary at footer ─────────────────────────────────────────
+    lines.append(f"\n{'═'*60}")
+    lines.append("KPI-WISE EXCEPTION SUMMARY:")
+
+    kpi_summary: dict[str, dict] = {}
+    for a in anomalies:
+        k   = a.get("kpi", "OTHER")
+        sev = a.get("severity", "P2")
+        if k not in kpi_summary:
+            kpi_summary[k] = {"P1": 0, "P2": 0, "P3": 0, "total": 0}
+        kpi_summary[k][sev] = kpi_summary[k].get(sev, 0) + 1
+        kpi_summary[k]["total"] += 1
+
+    for k, counts in sorted(kpi_summary.items(), key=lambda x: -x[1]["total"]):
+        meta  = KPI_META.get(k, {"label": k})
+        p1_c  = counts.get("P1", 0)
+        p2_c  = counts.get("P2", 0)
+        label = meta.get("label", k)
         lines.append(
-            f"\n  AUTHENTICITY FLAGS: Pilferage={pil} | "
-            f"Discount Fraud={dsc} | Returns={ret}"
+            f"  {label:<28} Total={counts['total']:>3}  "
+            f"[P1={p1_c}  P2={p2_c}]"
         )
 
-    if anomaly_result.get("upt_computed"):
-        lines.append("  [UPT auto-computed from QTY ÷ bill_count]")
+    if pil_cnt > 0:
+        lines.append(f"\n  ⚠ PILFERAGE ALERT: {pil_cnt} store(s) with bill integrity breach — ESCALATE TO LOSS PREVENTION IMMEDIATELY")
+    if dsc_cnt > 0:
+        lines.append(f"  ⚠ DISCOUNT FRAUD: {dsc_cnt} instance(s) — PULL DISCOUNT LOGS AND AUDIT AUTHORIZATION CHAIN")
+    if ret_cnt > 0:
+        lines.append(f"  ⚠ RETURNS SPIKE: {ret_cnt} store(s) exceeding 5% return rate — INVESTIGATE PRODUCT QUALITY OR FRAUD")
 
+    if anomaly_result.get("upt_computed"):
+        lines.append("  [UPT auto-computed from QTY ÷ bill_count — verify column mapping]")
+
+    lines.append("╚" + "═" * 59 + "╝")
     return "\n".join(lines)

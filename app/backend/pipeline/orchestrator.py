@@ -1201,11 +1201,14 @@ class PipelineOrchestrator:
 
         STORE_F   = "STORE_ID NOT IN (SELECT CODE FROM `vmart_sales`.`stores` WHERE CLOSING_DATE IS NOT NULL)"
         STORE_F_P = "p.STORE_ID NOT IN (SELECT CODE FROM `vmart_sales`.`stores` WHERE CLOSING_DATE IS NOT NULL)"
-        INV_SUB   = "(SELECT ICODE, SUM(toFloat64OrZero(SOH)) AS SOH FROM `vmart_product`.`inventory_current` GROUP BY ICODE)"
+        # INV_SUB: SOH is Int32 in inventory_current — use ifNull to handle NULLs from LEFT JOIN
+        INV_SUB   = "(SELECT ICODE, SUM(ifNull(SOH, 0)) AS SOH FROM `vmart_product`.`inventory_current` GROUP BY ICODE)"
 
         from clickhouse.query_runner import run_query
 
-        # Build all 6 SQL strings upfront
+        # Build all 7 SQL strings upfront
+        # store_inventory: ORDER BY mtd_qty DESC LIMIT 500 — ensures ALL active stores included
+        # (was: ORDER BY sell_thru_pct ASC LIMIT 100 → missed high-ST% stores like top performers)
         sql_store_inventory = f"""
             WITH mtd AS (
                 SELECT STORE_ID, ICODE, SUM(QTY) AS mtd_qty
@@ -1222,20 +1225,20 @@ class PipelineOrchestrator:
                 anyLast(st.ZONE)      AS zone,
                 anyLast(st.REGION)    AS region,
                 SUM(ms.mtd_qty)       AS mtd_qty,
-                SUM(toFloat64OrZero(inv.SOH)) AS total_soh,
-                round(SUM(ms.mtd_qty) / nullIf(SUM(ms.mtd_qty) + SUM(toFloat64OrZero(inv.SOH)), 0) * 100, 1)
+                SUM(ifNull(inv.SOH, 0)) AS total_soh,
+                round(SUM(ms.mtd_qty) / nullIf(SUM(ms.mtd_qty) + SUM(ifNull(inv.SOH, 0)), 0) * 100, 1)
                     AS sell_thru_pct,
-                round(SUM(toFloat64OrZero(inv.SOH)) / nullIf(SUM(ms.mtd_qty) / {days_elapsed}, 0), 0)
+                round(SUM(ifNull(inv.SOH, 0)) / nullIf(SUM(ms.mtd_qty) / {days_elapsed}, 0), 0)
                     AS doi
             FROM mtd ms
             LEFT JOIN `vmart_product`.`inventory_current` inv
-                ON ms.STORE_ID = inv.STORE_ID AND ms.ICODE = inv.ICODE
+                ON ms.STORE_ID = inv.STORE_CODE AND ms.ICODE = inv.ICODE
             LEFT JOIN `vmart_sales`.`stores` st ON ms.STORE_ID = st.CODE
             WHERE st.CLOSING_DATE IS NULL
             GROUP BY ms.STORE_ID
             HAVING SUM(ms.mtd_qty) > 0
-            ORDER BY sell_thru_pct ASC
-            LIMIT 100
+            ORDER BY mtd_qty DESC
+            LIMIT 500
         """
 
         sql_dept = f"""
@@ -1400,7 +1403,25 @@ class PipelineOrchestrator:
                     logger.warning(f"Supp peak_hours query failed: {e2}")
                     return "peak_hours", {}
 
-        # Run all 6 queries in parallel — saves ~15-25 seconds vs sequential
+        # 7th query: last_30_days daily trend — feeds 30-Day Outlook section
+        sql_last_30_days = f"""
+            SELECT
+                toDate(BILLDATE)                    AS dt,
+                round(SUM(NETAMT), 0)               AS net_sales,
+                SUM(QTY)                            AS total_qty,
+                COUNT(DISTINCT BILLNO)              AS bills,
+                COUNT(DISTINCT STORE_ID)            AS active_stores,
+                round(SUM(NETAMT) / nullIf(COUNT(DISTINCT BILLNO), 0), 0) AS atv,
+                round(SUM(QTY) / nullIf(COUNT(DISTINCT BILLNO), 0), 2)    AS upt
+            FROM `vmart_sales`.`pos_transactional_data`
+            WHERE toDate(BILLDATE) BETWEEN toDate('{date}') - 29 AND toDate('{date}')
+              AND QTY > 0
+              AND {STORE_F}
+            GROUP BY dt
+            ORDER BY dt ASC
+        """
+
+        # Run all 7 queries in parallel
         tasks = [
             _run("store_inventory", sql_store_inventory),
             _run("dept", sql_dept),
@@ -1408,6 +1429,7 @@ class PipelineOrchestrator:
             _run("articles_bottom", sql_articles_bottom),
             _run_peak(),
             _run("top_mrp", sql_top_mrp),
+            _run("last_30_days", sql_last_30_days),
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
