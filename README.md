@@ -51,16 +51,32 @@ Retail operations generate enormous amounts of data across hundreds of stores, t
 
 ## 2. Business KPI Targets
 
-RIECT is built around four measurable retail KPIs:
+RIECT is built around **13 measurable retail KPIs** across five categories:
+
+### Core KPIs (Alert Engine)
 
 | KPI | Full Name | Direction | Target | Thresholds |
 |---|---|---|---|---|
 | **SPSF** | Sales Per Square Foot | ↑ Maximise | ₹1,000/sqft/month | P1<₹500 · P2<₹750 · P3<₹1,000 |
 | **ST%** | Sell-Through % | ↑ Maximise | 95% | P1<60% · P2<80% · P3<95% |
 | **DOI** | Days of Inventory | ↓ Minimise | ≤15 days | P1>90d · P2>60d · P3>30d |
-| **UPT** | Units Per Transaction | ↑ Maximise | 2.5 | P1<1.2 · P2<1.5 · P3<2.0 |
+| **MBQ** | Min Buy Qty Compliance | ↑ Maximise | 100% | P1<60% · P2<80% · P3<95% |
 
-Every alert, recommendation, and chatbot response is anchored to these four targets.
+### Extended KPIs (Analysis & Anomaly Detection)
+
+| Category | KPI | Full Name | Direction |
+|---|---|---|---|
+| **Transaction** | ATV | Avg Transaction Value | ↑ Maximise |
+| **Transaction** | UPT | Units Per Transaction | ↑ Maximise |
+| **Margin** | DISCOUNT_RATE | Discount Rate % | ↓ Minimise |
+| **Margin** | NON_PROMO_DISC | Non-Promo Discount % | ↓ Minimise |
+| **Margin** | GROSS_MARGIN | Gross Margin % | ↑ Maximise |
+| **Customer** | MOBILE_PENET | Mobile Customer Penetration % | ↑ Maximise |
+| **Operations** | BILL_INTEGRITY | Bill Integrity % | ↑ Maximise |
+| **Supply Chain** | GIT_COVERAGE | Goods-In-Transit Coverage (days) | ↓ Minimise |
+| **Planning** | AOP_VS_ACTUAL | AOP vs Actual % | ↑ Target 100% |
+
+Every alert, recommendation, and chatbot response is anchored to these targets. The system auto-detects which KPIs are computable from available data and only surfaces relevant metrics.
 
 ---
 
@@ -90,15 +106,31 @@ SEE  →  KNOW  →  DECIDE  →  ACT  →  TRACK
 ### Intelligent Alert / Exception Engine
 - Threshold-based breach detection across all active stores
 - Statistical anomaly detection (z-score, directional — underperformers for SPSF/ST, overstock for DOI)
+- Extended anomaly detection: ATV, Discount Rate, Mobile Penetration, Bill Integrity, Gross Margin
 - IST (Inter Store Transfer) vs Markdown decision framework per anomaly
 - Alert inbox: P1/P2/P3 ranked with root cause + top 3 actions + owner + timeline
+- Compound upgrade rule: dual P2 breaches on same store → auto-escalate to P1
 
 ### AI Chatbot — Full Retail Intelligence
 - Natural language query → ClickHouse SQL → structured analysis
-- 8-section comprehensive report: Executive Summary → KPI Scorecard → Store Performance → Dept/Articles → MRP → Anomalies → Peak Hours → Priority Actions
+- 8-section comprehensive report: Executive Summary (1A–1H KPI hierarchy) → KPI Scorecard → Store Performance → Dept/Articles → MRP → Anomalies → Peak Hours → Priority Actions
+- **13-KPI dynamic availability map** — LLM only generates sections for KPIs present in data
+- **Indian FY date intelligence** — YTD/MTD/WTD/QTD/LTL all resolved to Apr 1–Mar 31 FY
 - Supplementary auto-queries: dept breakdown, articles, peak hours, top MRP — all auto-fetched
-- Inline ATV, UPT computation from raw data — no pre-computed columns required
+- Inline ATV, UPT, Discount Rate computation from raw data — no pre-computed columns required
 - Multi-LLM routing: Claude Sonnet, OpenAI GPT-4, Gemini, Qwen, Ollama (local)
+
+### Product Alignment Cache
+- Article master (ICODE, article name, division, section, department, cost, MRP) synced from ClickHouse to SQLite
+- Sub-millisecond product lookups — no ClickHouse round-trip for master data
+- Indexed by division, section, department for category filtering
+- On-demand cache refresh via `POST /api/products/sync`
+
+### FY Date Intelligence Engine
+- All temporal queries resolved using Indian Financial Year (Apr 1 – Mar 31)
+- YTD, MTD, WTD, QTD, LTL periods auto-resolved with correct FY dates
+- FY week numbering (Week 1 = first Monday on/after Apr 1)
+- LTL (Like-for-Like): single-query dual-range pattern for YoY comparison without subqueries
 
 ### Store Performance Analysis
 - Top 10 + Bottom 10 stores by SPSF/sales with Region, Zone, SPSF, ATV, Bills, UPT
@@ -140,8 +172,8 @@ DSR|RIECT/
 ├── app/
 │   ├── backend/
 │   │   ├── main.py                    # FastAPI app entry point
-│   │   ├── config.py                  # KPI thresholds, app settings
-│   │   ├── db.py                      # SQLite init & connection
+│   │   ├── config.py                  # KPI thresholds (13 KPIs), app settings
+│   │   ├── db.py                      # SQLite init & connection (7 tables)
 │   │   ├── requirements.txt
 │   │   │
 │   │   ├── clickhouse/
@@ -159,9 +191,11 @@ DSR|RIECT/
 │   │   │   ├── orchestrator.py        # Master pipeline: route → SQL → KPI → LLM → stream
 │   │   │   ├── intent_engine.py       # Query intent classification (regex + keyword)
 │   │   │   ├── query_normalizer.py    # Date resolution, typo fix, store name normalisation
+│   │   │   ├── date_engine.py         # ★ NEW: Indian FY date intelligence (YTD/MTD/WTD/QTD/LTL)
+│   │   │   ├── kpi_alignment.py       # ★ NEW: 13-KPI registry + availability detection
 │   │   │   ├── context_builder.py     # Builds context dict (schema, history, hints)
 │   │   │   ├── sql_generator.py       # LLM → ClickHouse SQL with rules + validation
-│   │   │   ├── prompt_builder.py      # Final LLM prompt assembly (8-section format)
+│   │   │   ├── prompt_builder.py      # Final LLM prompt (8-section + KPI availability map)
 │   │   │   ├── vectoriser.py          # Schema table ranking by semantic similarity
 │   │   │   └── response_formatter.py # Structures final response blocks
 │   │   │
@@ -172,18 +206,23 @@ DSR|RIECT/
 │   │   │   │   ├── sell_thru_engine.py# Sell-Through % (item-level pre-agg, no row multiply)
 │   │   │   │   ├── doi_engine.py      # Days of Inventory + Days of Cover
 │   │   │   │   ├── mbq_engine.py      # Minimum Buy Quantity compliance
-│   │   │   │   └── anomaly_engine.py  # Z-score anomaly detection (directional)
+│   │   │   │   ├── extended_kpi_engine.py # ★ NEW: ATV, UPT, Discount, Margin, Mobile, GIT, AOP
+│   │   │   │   └── anomaly_engine.py  # Z-score anomaly detection (13 KPIs, directional)
 │   │   │   │
 │   │   │   ├── alert_engine/
 │   │   │   │   ├── live_scanner.py    # Startup/on-demand ClickHouse KPI scan
-│   │   │   │   ├── priority_engine.py # P1/P2/P3/P4 classification rules
+│   │   │   │   ├── priority_engine.py # P1/P2/P3/P4 classification + compound upgrade
 │   │   │   │   ├── alert_generator.py # KPI breach → AlertRecord objects
 │   │   │   │   ├── action_recommender.py # Alert → action playbook enrichment
 │   │   │   │   └── alert_store.py     # SQLite read/write for alerts
 │   │   │   │
+│   │   │   ├── product_engine/        # ★ NEW: Product alignment cache
+│   │   │   │   └── product_alignment.py # ClickHouse → SQLite product master cache
+│   │   │   │
 │   │   │   └── api/
 │   │   │       ├── kpi_api.py         # GET /api/kpi/live, GET /api/kpi/riect
-│   │   │       └── alerts_api.py      # GET/POST /api/alerts/*
+│   │   │       ├── alerts_api.py      # GET/POST /api/alerts/*
+│   │   │       └── product_api.py     # ★ NEW: GET/POST /api/products/*
 │   │   │
 │   │   └── settings/
 │   │       ├── settings_store.py      # ClickHouse config, LLM keys (SQLite-backed)
@@ -195,7 +234,7 @@ DSR|RIECT/
 │       ├── app.js                     # WebSocket client, markdown render, UI logic
 │       └── styles.css                 # Dark theme, scrollable tables, KPI tiles
 │
-├── ARCHITECTURE.md                    # Technical deep-dive
+├── ARCHITECTURE.md                    # Technical deep-dive (v3.0.0)
 ├── README.md                          # This file
 ├── RIECT-PLAN.md                      # Strategic roadmap
 ├── RIECT-BACKEND-ENGINE.md            # Engine reference
@@ -282,13 +321,21 @@ store_id,floor_sqft
 | `WS` | `/ws/chat` | WebSocket — real-time chatbot with streaming |
 | `GET` | `/api/kpi/live` | Live chain-level KPI snapshot (ClickHouse) |
 | `GET` | `/api/kpi/riect` | KPI dashboard config (thresholds + alert counts) |
-| `GET` | `/api/alerts/` | Fetch active alerts (P1/P2/P3 ranked) |
-| `POST` | `/api/alerts/scan` | Trigger on-demand live KPI scan |
-| `GET` | `/api/alerts/summary` | Alert counts by priority and KPI type |
+| `GET` | `/api/alerts` | Fetch active alerts (P1/P2/P3 ranked) |
+| `POST` | `/api/alerts/run` | Run alert engine on provided query result |
+| `POST` | `/api/alerts/scan` | Trigger on-demand live KPI scan from ClickHouse |
+| `PATCH` | `/api/alerts/{id}/resolve` | Mark alert as resolved |
+| `GET` | `/api/alerts/summary` | Alert counts by priority |
+| `GET` | `/api/products/search` | Search product master by name/code |
+| `GET` | `/api/products/{icode}` | Lookup article by ICODE |
+| `POST` | `/api/products/sync` | Refresh product alignment cache from ClickHouse |
+| `GET` | `/api/riect-plan` | Get all KPI target configurations |
+| `POST` | `/api/riect-plan` | Set/override KPI threshold target |
 | `POST` | `/api/settings/clickhouse` | Save ClickHouse connection config |
-| `POST` | `/api/settings/llm` | Save LLM API key |
-| `GET` | `/api/schema/summary` | ClickHouse schema overview |
-| `POST` | `/api/sqft/import` | Import store floor sqft from CSV |
+| `POST` | `/api/settings/llm/{provider}` | Save LLM API key |
+| `GET` | `/api/schema/tables` | ClickHouse schema overview |
+| `POST` | `/api/store-sqft/import` | Import store floor sqft from CSV |
+| `GET` | `/api/store-sqft/status` | Store sqft load status |
 
 ### WebSocket Message Protocol
 
@@ -326,7 +373,7 @@ The LLM router selects the configured default. All LLM calls use:
 
 ### SPSF Engine (`spsf_engine.py`)
 - **Formula**: `MTD Net Sales ÷ Floor SQFT × (Days in Month ÷ Days Elapsed)`
-- **Input**: Store-level MTD sales + floor sqft lookup
+- **Input**: Store-level MTD sales + floor sqft lookup (755 stores loaded)
 - **Output**: Monthly-projected SPSF per store, P1/P2/P3 breach list
 - **Rule**: Stores with floor sqft < 300 excluded (kiosk filter)
 
@@ -341,10 +388,34 @@ The LLM router selects the configured default. All LLM calls use:
 - **Store level**: Pre-aggregated subqueries — inventory by STORE_CODE, sales by STORE_ID
 - **Chain level**: `sumIf(icode_soh, icode_qty > 0) / sumIf(icode_qty, icode_qty > 0)`
 
+### Extended KPI Engine (`extended_kpi_engine.py`) ★ NEW
+- **ATV**: `net_sales_amount / bill_count` per store
+- **UPT**: `total_qty / bill_count` per store
+- **Discount Rate**: `discount_amount / gross_amount × 100`
+- **Non-Promo Disc**: Discount % on non-promotional bills
+- **Gross Margin**: `(net_sales - cost) / net_sales × 100`
+- **Mobile Penetration**: `distinct_mobile / total_bills × 100`
+- **Bill Integrity**: `valid_bills / total_bills × 100`
+- **GIT Coverage**: `git_qty / avg_daily_sales` (days)
+- **AOP vs Actual**: `actual_sales / aop_target × 100`
+- **Auto-detection**: `detect_available_kpis(df)` only computes KPIs where required columns exist
+
+### KPI Alignment Registry (`kpi_alignment.py`) ★ NEW
+- Central 13-KPI registry with labels, categories, required columns
+- `get_available_categories(df)` — groups available KPIs by category for prompt section building
+- Drives the **KPI AVAILABILITY MAP** injected into LLM prompts
+
 ### Anomaly Engine (`anomaly_engine.py`)
 - **Method**: Z-score per KPI column across store dataset
 - **Threshold**: Z ≥ 2.0 (P2 anomaly), Z ≥ 3.0 (P1 critical)
-- **Directional masking**: Only flags low z for SPSF/UPT/Sales (underperformers); only high z for DOI (overstock). Prevents top performers appearing in anomaly list.
+- **Directional masking**: Only flags low z for SPSF/UPT/ATV/Sales/Margin (underperformers); only high z for DOI/Discount Rate (overstock/excess). Prevents top performers appearing in anomaly list.
+- **Extended columns**: ATV, discount_rate, mobile_pct, bill_integrity, gross_margin_pct added
+
+### FY Date Engine (`date_engine.py`) ★ NEW
+- Indian FY: Apr 1 – Mar 31
+- Resolves YTD, MTD, WTD, QTD, LTL periods to correct FY-aligned date ranges
+- FY week numbering starting from first Monday on/after Apr 1
+- LTL generates single-query dual-range SQL for YoY same-period comparison
 
 ---
 
@@ -422,9 +493,10 @@ STORE_ID NOT IN (SELECT CODE FROM vmart_sales.stores WHERE CLOSING_DATE IS NOT N
 
 | Phase | Capability | Status |
 |---|---|---|
-| **Phase 1** | Alert/Exception Engine, KPI detection, chatbot | ✅ Live |
+| **Phase 1** | Alert/Exception Engine, SPSF/ST%/DOI KPI detection, chatbot | ✅ Live |
 | **Phase 2** | Control Tower Dashboard (dual-pane: KPI tiles + chat) | ✅ Live |
-| **Phase 3** | Real-time signal ingestion, scheduled scans | 🔄 In Progress |
+| **Phase 2b** | Extended KPI Engine (13 KPIs), FY Date Intelligence, Product Alignment Cache | ✅ Live |
+| **Phase 3** | Alert UI panel, real-time signal ingestion, scheduled scans | 🔄 In Progress |
 | **Phase 4** | Execution loop — playbooks, escalation, outcome tracking | 📋 Planned |
 | **Phase 5** | Forecast deviation, forward DOI projection | 📋 Planned |
 | **Phase 6** | Vendor risk signals, supply chain intelligence | 📋 Planned |

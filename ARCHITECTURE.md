@@ -1,6 +1,6 @@
 # DSR|RIECT — Technical Architecture
 
-**Version:** 2.0.0
+**Version:** 3.0.0
 **Date:** March 2026
 **Author:** Dinesh Srivastava
 **Status:** Production
@@ -15,20 +15,23 @@
 4. [Data Flow — End to End](#4-data-flow--end-to-end)
 5. [Pipeline Stages (Orchestrator)](#5-pipeline-stages-orchestrator)
 6. [KPI Engine Architecture](#6-kpi-engine-architecture)
-7. [Alert Engine Architecture](#7-alert-engine-architecture)
-8. [LLM Router Architecture](#8-llm-router-architecture)
-9. [SQL Generation Engine](#9-sql-generation-engine)
-10. [Prompt Builder Architecture](#10-prompt-builder-architecture)
-11. [Supplementary Query System](#11-supplementary-query-system)
-12. [Frontend Architecture](#12-frontend-architecture)
-13. [Database Schema](#13-database-schema)
-14. [ClickHouse Data Model](#14-clickhouse-data-model)
-15. [Active Store Rule](#15-active-store-rule)
-16. [Anomaly Detection Design](#16-anomaly-detection-design)
-17. [Security Design](#17-security-design)
-18. [Performance Characteristics](#18-performance-characteristics)
-19. [Deployment Architecture](#19-deployment-architecture)
-20. [Key Design Decisions](#20-key-design-decisions)
+7. [Extended KPI Engine (13 KPIs)](#7-extended-kpi-engine-13-kpis)
+8. [FY Date Intelligence Engine](#8-fy-date-intelligence-engine)
+9. [Alert Engine Architecture](#9-alert-engine-architecture)
+10. [LLM Router Architecture](#10-llm-router-architecture)
+11. [SQL Generation Engine](#11-sql-generation-engine)
+12. [Prompt Builder Architecture](#12-prompt-builder-architecture)
+13. [Supplementary Query System](#13-supplementary-query-system)
+14. [Product Alignment Engine](#14-product-alignment-engine)
+15. [Frontend Architecture](#15-frontend-architecture)
+16. [Database Schema](#16-database-schema)
+17. [ClickHouse Data Model](#17-clickhouse-data-model)
+18. [Active Store Rule](#18-active-store-rule)
+19. [Anomaly Detection Design](#19-anomaly-detection-design)
+20. [Security Design](#20-security-design)
+21. [Performance Characteristics](#21-performance-characteristics)
+22. [Deployment Architecture](#22-deployment-architecture)
+23. [Key Design Decisions](#23-key-design-decisions)
 
 ---
 
@@ -130,8 +133,17 @@ The central brain — 11-stage pipeline described in Section 5.
 **Directory:** `app/backend/riect/`
 
 Deterministic Python engines — no LLM inference for KPI computation:
-- `kpi_engine/` — SPSF, Sell-Through, DOI, MBQ, Anomaly
+- `kpi_engine/` — SPSF, Sell-Through, DOI, MBQ, Anomaly + Extended KPI Engine (13 KPIs)
 - `alert_engine/` — Priority classification, alert generation, action playbooks
+- `product_engine/` — Product alignment cache layer (ClickHouse → SQLite fast lookups)
+
+### Layer 4b — FY Date Intelligence
+**File:** `app/backend/pipeline/date_engine.py`
+
+Indian Financial Year (Apr 1 – Mar 31) date intelligence engine providing:
+- YTD, MTD, WTD, QTD, LTL (Like-for-Like) period resolution
+- FY week numbering (Week 1 = first Monday on or after Apr 1)
+- Days elapsed in FY, prior FY same-period alignment
 
 ### Layer 5 — Data Layer
 - **ClickHouse** (remote, read-only): real-time retail transactional + inventory data
@@ -373,7 +385,119 @@ else:
 
 ---
 
-## 7. Alert Engine Architecture
+## 7. Extended KPI Engine (13 KPIs)
+
+**File:** `riect/kpi_engine/extended_kpi_engine.py`
+**Registry:** `pipeline/kpi_alignment.py`
+
+### KPI Alignment Registry (`kpi_alignment.py`)
+
+```python
+KPI_REGISTRY = {
+    # Core KPIs
+    "SPSF":               {"label": "Sales Per Sq Ft",        "category": "productivity"},
+    "SELL_THRU":          {"label": "Sell-Through %",          "category": "inventory"},
+    "DOI":                {"label": "Days of Inventory",       "category": "inventory"},
+    "MBQ":                {"label": "Min Buy Qty Compliance",  "category": "inventory"},
+    # Extended KPIs
+    "ATV":                {"label": "Avg Transaction Value",   "category": "transaction"},
+    "UPT":                {"label": "Units Per Transaction",   "category": "transaction"},
+    "DISCOUNT_RATE":      {"label": "Discount Rate %",         "category": "margin"},
+    "NON_PROMO_DISC":     {"label": "Non-Promo Discount %",    "category": "margin"},
+    "GROSS_MARGIN":       {"label": "Gross Margin %",          "category": "margin"},
+    "MOBILE_PENETRATION": {"label": "Mobile Customer %",       "category": "customer"},
+    "BILL_INTEGRITY":     {"label": "Bill Integrity %",        "category": "operations"},
+    "GIT_COVERAGE":       {"label": "GIT Coverage (days)",     "category": "supply_chain"},
+    "AOP_VS_ACTUAL":      {"label": "AOP vs Actual %",         "category": "planning"},
+}
+```
+
+`detect_available_kpis(df)` — auto-detects which KPIs can be computed from available columns.
+`get_available_categories(df)` — returns groupings for prompt section building.
+
+### Extended Engine Groups
+
+| Engine Group | KPIs Computed | Formula |
+|---|---|---|
+| **ATV** | Avg Transaction Value | `net_sales_amount / bill_count` |
+| **UPT** | Units Per Transaction | `total_qty / bill_count` |
+| **Discount Rate** | Discount Rate % | `discount_amount / gross_amount × 100` |
+| **Non-Promo Discount** | Non-Promo Disc % | `discount_amount / gross_amount × 100` (non-promo bills only) |
+| **Gross Margin** | Gross Margin % | `(net_sales - cost_of_goods) / net_sales × 100` |
+| **Mobile Penetration** | Mobile Customer % | `distinct_mobile / total_bills × 100` |
+| **Bill Integrity** | Bill Integrity % | `valid_bills / total_bills × 100` |
+| **SOH Health** | SOH Health Score | `available_soh / total_soh × 100` |
+| **GIT Coverage** | GIT Coverage (days) | `git_qty / avg_daily_sales` |
+| **MBQ Shortfall** | MBQ Shortfall Amount | `(mbq_target - current_soh) × cost_price` |
+| **AOP vs Actual** | AOP vs Actual % | `actual_sales / aop_target × 100` |
+
+### KPI Controller Integration
+
+`kpi_controller.py` exposes:
+```python
+run_all(query_result)     → unified result with kpi_availability + available_categories
+run_extended(df, context) → extended KPI metrics dict
+```
+
+Output includes `kpi_availability` (which KPIs are computable from data) and `available_categories` (for prompt section selection), allowing the prompt builder to inject only relevant KPI sections.
+
+### Extended Anomaly Detection
+
+`anomaly_engine.py` extended with:
+
+```python
+KPI_ANOMALY_COLUMNS = {
+    ...existing...
+    "atv":              ("ATV",              "Avg Transaction Value",  "low"),
+    "discount_rate":    ("DISCOUNT_RATE",    "Discount Rate %",        "high"),
+    "mobile_pct":       ("MOBILE_PENET",     "Mobile Penetration %",   "low"),
+    "bill_integrity":   ("BILL_INTEGRITY",   "Bill Integrity %",       "low"),
+    "gross_margin_pct": ("GROSS_MARGIN",     "Gross Margin %",         "low"),
+}
+```
+
+---
+
+## 8. FY Date Intelligence Engine
+
+**File:** `pipeline/date_engine.py`
+
+Indian Financial Year: **April 1 → March 31**
+
+### Period Definitions
+
+| Period | Resolution |
+|---|---|
+| `YTD` | Apr 1 of current FY → `latest_sales_date` |
+| `MTD` | 1st of current month → `latest_sales_date` |
+| `WTD` | Monday of current FY week → `latest_sales_date` |
+| `QTD` | Start of current FY quarter → `latest_sales_date` |
+| `LTL` | Like-for-Like: same date range in prior FY (FY-1) |
+| `FY_FULL` | Apr 1 → Mar 31 of current or prior FY |
+
+### FY Week Numbering
+
+- **Week 1** = first Monday on or after April 1
+- Aligns with retail industry standard week reporting
+- `days_elapsed_fy` = number of days from Apr 1 to `latest_sales_date`
+
+### LTL (Like-for-Like) Pattern
+
+Used in ClickHouse SQL for same-period YoY comparison:
+```sql
+-- Current period
+sumIf(NETAMT, toDate(BILLDATE) BETWEEN '2025-04-01' AND '2026-02-28') AS current_ytd,
+-- Prior FY same period
+sumIf(NETAMT, toDate(BILLDATE) BETWEEN '2024-04-01' AND '2025-02-28') AS prior_ytd,
+-- Growth %
+round((current_ytd - prior_ytd) / prior_ytd * 100, 1) AS ytd_growth_pct
+```
+
+Single-query dual-range pattern — no subqueries, no row duplication.
+
+---
+
+## 9. Alert Engine Architecture
 
 **Directory:** `riect/alert_engine/`
 
@@ -454,7 +578,7 @@ def classify_priority(kpi_type: str, value: float) -> str:
 
 ---
 
-## 8. LLM Router Architecture
+## 10. LLM Router Architecture
 
 **File:** `llm/llm_router.py`
 
@@ -484,7 +608,7 @@ Each client implements:
 
 ---
 
-## 9. SQL Generation Engine
+## 11. SQL Generation Engine
 
 **File:** `pipeline/sql_generator.py`
 
@@ -523,7 +647,7 @@ DANGEROUS = ["DROP", "DELETE", "TRUNCATE", "ALTER",
 
 ---
 
-## 10. Prompt Builder Architecture
+## 12. Prompt Builder Architecture
 
 **File:** `pipeline/prompt_builder.py`
 
@@ -531,6 +655,14 @@ DANGEROUS = ["DROP", "DELETE", "TRUNCATE", "ALTER",
 
 ```
 SECTION 1 — EXECUTIVE SUMMARY         (2-3 sentences, numbers first)
+  1A — Productivity KPIs   (SPSF, ATV, UPT)
+  1B — Inventory KPIs      (ST%, DOI, SOH Health, GIT Coverage)
+  1C — Margin KPIs         (Gross Margin%, Discount Rate%, Non-Promo Disc%)
+  1D — Customer KPIs       (Mobile Penetration%)
+  1E — Operations KPIs     (Bill Integrity%)
+  1F — MBQ Compliance      (MBQ Shortfall Amount)
+  1G — Supply Chain KPIs   (GIT Coverage)
+  1H — AOP vs Actual       (Planning deviation%)
 SECTION 2 — KPI SCORECARD TABLE       (Chain avg vs target vs P1/P2/P3)
 SECTION 3 — STORE PERFORMANCE         (Top 10 + Bottom 10 with insights)
 SECTION 4 — DEPT & ARTICLE ANALYSIS   (Top/Bottom 10 departments + articles)
@@ -538,6 +670,21 @@ SECTION 5 — TOP 7 HIGHEST MRP         (Premium product performance)
 SECTION 6 — ANOMALIES                 (Z-score flagged, IST/Markdown guidance)
 SECTION 7 — PEAK HOURS                (All stores, bill+mobile customer counts)
 SECTION 8 — PRIORITY ACTIONS          (WHO + WHAT + HOW MUCH + WHEN)
+```
+
+### KPI Availability Map
+
+`_build_kpi_sections()` helper inspects available KPIs from `kpi_availability` and injects a `KPI AVAILABILITY MAP` block into the user prompt — so the LLM only generates sections for KPIs actually present in the data:
+
+```
+═══ KPI AVAILABILITY MAP ══════════════════════════════
+  PRODUCTIVITY:  SPSF ✓ | ATV ✓ | UPT ✓
+  INVENTORY:     SELL_THRU ✓ | DOI ✓ | MBQ ✗ | GIT ✗
+  MARGIN:        GROSS_MARGIN ✗ | DISCOUNT_RATE ✓
+  CUSTOMER:      MOBILE_PENETRATION ✓
+  OPERATIONS:    BILL_INTEGRITY ✗
+  PLANNING:      AOP_VS_ACTUAL ✗
+═══════════════════════════════════════════════════════
 ```
 
 ### Injected Context Blocks
@@ -583,7 +730,7 @@ if has_atv:  # sales_col AND bill_col both present
 
 ---
 
-## 11. Supplementary Query System
+## 13. Supplementary Query System
 
 **Method:** `PipelineOrchestrator._run_supplementary_queries(context)`
 
@@ -608,7 +755,7 @@ The results are formatted by `_format_supplementary_data()` and injected as a cl
 
 ---
 
-## 12. Frontend Architecture
+## 15. Frontend Architecture
 
 **Directory:** `app/frontend/`
 
@@ -680,75 +827,178 @@ html = html.replace(/<\/table>/g, '</table></div>');
 
 ---
 
-## 13. Database Schema
+## 14. Product Alignment Engine
+
+**Files:** `riect/product_engine/product_alignment.py`, `riect/api/product_api.py`
+
+Caches product master data from ClickHouse into SQLite for fast, low-latency lookups without hitting ClickHouse on every request.
+
+### Cache Layer Design
+
+```
+ClickHouse (vmart_product.vitem_data)
+        │
+        ▼  [scheduled or on-demand sync]
+product_alignment (SQLite table)
+        │
+        ▼
+GET /api/products/...  →  sub-millisecond response
+```
+
+### SQLite Table: `product_alignment`
+
+```sql
+CREATE TABLE product_alignment (
+    icode            TEXT PRIMARY KEY,
+    article_code     TEXT,
+    article_name     TEXT,
+    division         TEXT,
+    section          TEXT,
+    department       TEXT,
+    option_code      TEXT,
+    cost_price       REAL,
+    mrp              REAL,
+    item_description TEXT,
+    supplier_name    TEXT,
+    style_or_pattern TEXT,
+    size             TEXT,
+    color            TEXT,
+    cached_at        TEXT
+);
+CREATE INDEX idx_pa_division   ON product_alignment(division);
+CREATE INDEX idx_pa_section    ON product_alignment(section);
+CREATE INDEX idx_pa_dept       ON product_alignment(department);
+```
+
+### Product API Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/products/search?q=...` | Search articles by name/code |
+| `GET` | `/api/products/{icode}` | Lookup single article by ICODE |
+| `GET` | `/api/products/division/{name}` | List articles by division |
+| `POST` | `/api/products/sync` | Trigger cache refresh from ClickHouse |
+
+---
+
+## 16. Database Schema
 
 **File:** `app/backend/db.py` (SQLite — `riect.db`)
 
 ### Tables
 
 ```sql
+-- Application settings (ClickHouse config, LLM keys)
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT
+);
+
 -- Conversation sessions
-CREATE TABLE chat_sessions (
-    id           TEXT PRIMARY KEY,
-    title        TEXT,
-    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at   DATETIME
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id TEXT PRIMARY KEY,
+    created_at TEXT,
+    title      TEXT,
+    role       TEXT DEFAULT 'HQ'
 );
 
 -- Message history per session
-CREATE TABLE chat_messages (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id   TEXT REFERENCES chat_sessions(id),
-    role         TEXT,     -- 'user' | 'assistant'
-    content      TEXT,
-    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE IF NOT EXISTS messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT,
+    role       TEXT,     -- 'user' | 'assistant'
+    content    TEXT,
+    created_at TEXT,
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
 );
+
+-- ClickHouse schema discovery cache (1hr TTL)
+CREATE TABLE IF NOT EXISTS schema_cache (
+    schema_name  TEXT,
+    table_name   TEXT,
+    columns_json TEXT,
+    cached_at    TEXT,
+    PRIMARY KEY (schema_name, table_name)
+);
+
+-- Store floor sqft master (755 stores loaded from CSV)
+CREATE TABLE IF NOT EXISTS store_sqft (
+    store_id   INTEGER PRIMARY KEY,
+    store_name TEXT,
+    shrtname   TEXT,
+    sitetype   TEXT,
+    floor_sqft INTEGER DEFAULT 0,
+    city_name  TEXT,
+    updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_store_sqft_shrtname ON store_sqft(shrtname);
+
+-- RIECT Plan: KPI target overrides (config.py defaults unless overridden here)
+CREATE TABLE IF NOT EXISTS riect_plan (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    kpi_type        TEXT NOT NULL,
+    dimension       TEXT DEFAULT 'global',
+    dimension_value TEXT DEFAULT '',
+    p1_threshold    REAL,
+    p2_threshold    REAL,
+    p3_threshold    REAL,
+    target          REAL,
+    period          TEXT DEFAULT '',
+    notes           TEXT DEFAULT '',
+    updated_at      TEXT,
+    UNIQUE(kpi_type, dimension, dimension_value)
+);
+
+-- Product master cache (ClickHouse → SQLite for fast lookups)
+CREATE TABLE IF NOT EXISTS product_alignment (
+    icode            TEXT PRIMARY KEY,
+    article_code     TEXT,
+    article_name     TEXT,
+    division         TEXT,
+    section          TEXT,
+    department       TEXT,
+    option_code      TEXT,
+    cost_price       REAL,
+    mrp              REAL,
+    item_description TEXT,
+    supplier_name    TEXT,
+    style_or_pattern TEXT,
+    size             TEXT,
+    color            TEXT,
+    cached_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pa_division ON product_alignment(division);
+CREATE INDEX IF NOT EXISTS idx_pa_section  ON product_alignment(section);
+CREATE INDEX IF NOT EXISTS idx_pa_dept     ON product_alignment(department);
 
 -- Alert/exception store
-CREATE TABLE riect_alerts (
-    id               TEXT PRIMARY KEY,
-    session_id       TEXT,
-    kpi_type         TEXT,
-    dimension        TEXT,
-    dimension_value  TEXT,
-    metric_value     REAL,
-    chain_avg        REAL,
-    gap_to_target    REAL,
-    priority         TEXT,   -- P1 | P2 | P3
-    exception_text   TEXT,
-    action           TEXT,
-    owner            TEXT,
-    timeline         TEXT,
-    created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
-    is_scan_alert    INTEGER DEFAULT 0
-);
-
--- Application settings (ClickHouse config, LLM keys)
-CREATE TABLE settings (
-    key    TEXT PRIMARY KEY,
-    value  TEXT
-);
-
--- Store floor sqft master
-CREATE TABLE store_sqft (
-    store_id    INTEGER PRIMARY KEY,
-    floor_sqft  INTEGER,
-    store_name  TEXT
-);
-
--- KPI plan targets
-CREATE TABLE kpi_targets (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    kpi_type    TEXT,
-    target_value REAL,
-    description TEXT,
-    updated_at  DATETIME
+CREATE TABLE IF NOT EXISTS riect_alerts (
+    alert_id           TEXT PRIMARY KEY,
+    created_at         TEXT NOT NULL,
+    session_id         TEXT,
+    priority           TEXT NOT NULL,    -- P1 | P2 | P3 | P4
+    kpi_type           TEXT NOT NULL,    -- SPSF | SELL_THRU | DOI | MBQ
+    signal_type        TEXT NOT NULL,    -- SPSF_BREACH | SELL_THRU_BREACH | ...
+    dimension          TEXT NOT NULL,    -- store | category | sku
+    dimension_value    TEXT NOT NULL,    -- Store name / category / SKU
+    kpi_value          REAL,
+    threshold          REAL,
+    gap                REAL,
+    status             TEXT,             -- OPEN | RESOLVED
+    exception_text     TEXT,
+    recommended_action TEXT,
+    action_owner       TEXT,
+    response_timeline  TEXT,
+    expected_impact    TEXT,
+    resolved           INTEGER DEFAULT 0,
+    resolved_at        TEXT
 );
 ```
 
 ---
 
-## 14. ClickHouse Data Model
+## 17. ClickHouse Data Model
 
 **Remote cluster:** `chn1.vmart-tools.com:8443` (HTTPS, read-only)
 
@@ -782,7 +1032,7 @@ STORE_ID NOT IN (SELECT CODE FROM vmart_sales.stores WHERE CLOSING_DATE IS NOT N
 
 ---
 
-## 15. Active Store Rule
+## 18. Active Store Rule
 
 **Rule**: All queries exclude stores where `CLOSING_DATE IS NOT NULL` in `vmart_sales.stores`.
 
@@ -798,7 +1048,7 @@ This rule is applied at three levels:
 
 ---
 
-## 16. Anomaly Detection Design
+## 19. Anomaly Detection Design
 
 **File:** `riect/kpi_engine/anomaly_engine.py`
 
@@ -830,7 +1080,7 @@ Without directional masking, a top-performing store with SPSF = ₹4,000 (z = +4
 
 ---
 
-## 17. Security Design
+## 20. Security Design
 
 | Concern | Approach |
 |---|---|
@@ -844,7 +1094,7 @@ Without directional masking, a top-performing store with SPSF = ₹4,000 (z = +4
 
 ---
 
-## 18. Performance Characteristics
+## 21. Performance Characteristics
 
 | Metric | Value |
 |---|---|
@@ -860,7 +1110,7 @@ Without directional masking, a top-performing store with SPSF = ₹4,000 (z = +4
 
 ---
 
-## 19. Deployment Architecture
+## 22. Deployment Architecture
 
 ### On-Premises Single Server
 
@@ -907,7 +1157,7 @@ On startup:
 
 ---
 
-## 20. Key Design Decisions
+## 23. Key Design Decisions
 
 ### Decision 1: Deterministic KPI Engines (no ML for KPI computation)
 **Rationale**: SPSF, ST%, DOI are deterministic formulas. Using ML would introduce unexplainable variance. Python/pandas engines are auditable, debuggable, and correct.
@@ -932,6 +1182,18 @@ On startup:
 
 ### Decision 7: max_tokens=8000 for Analysis
 **Rationale**: 8-section responses with 10-row tables, 3-store insight blocks, IST/Markdown guidance, and peak hours for all stores require 6,000–8,000 tokens. At 4,000 tokens, the LLM truncates sections mid-table.
+
+### Decision 8: Indian FY Date Engine (not calendar year)
+**Problem**: Standard `date_trunc('year', ...)` → Jan 1 is meaningless for Indian retail. YTD queries against calendar year misrepresent performance for Apr–Mar businesses.
+**Solution**: `date_engine.py` resolves all temporal contexts (YTD, MTD, WTD, QTD, LTL) to Indian FY (Apr 1 – Mar 31). All period SQL is generated with correct FY start/end dates, FY week numbers, and prior-FY same-period alignment for LTL comparisons.
+
+### Decision 9: 13-KPI Registry with Dynamic Availability Detection
+**Problem**: Not all queries return data sufficient for all 13 KPIs. Generating KPI sections for unavailable metrics produces N/A-filled tables and hallucination.
+**Solution**: `kpi_alignment.py` auto-detects which KPIs are computable from the available DataFrame columns. The prompt builder injects only available KPI sections, and the LLM receives an explicit `KPI AVAILABILITY MAP` so it never fabricates values for absent metrics.
+
+### Decision 10: Product Alignment Cache (ClickHouse → SQLite)
+**Problem**: Every product lookup against ClickHouse adds 1–3 seconds latency and consumes ClickHouse query slots for static master data that rarely changes.
+**Solution**: `product_alignment` SQLite table caches article/division/section/department/cost/MRP data locally. Lookups are sub-millisecond. Cache is refreshed on demand via `POST /api/products/sync`. Indexed on division, section, department for fast category filtering.
 
 ---
 
