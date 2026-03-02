@@ -97,6 +97,54 @@ UPT_THRESHOLDS = {
     "target": 2.5,
 }
 
+# ATV (Average Transaction Value) — ₹ per bill
+ATV_THRESHOLDS = {
+    "P1": 500,    # < ₹500 = Critical
+    "P2": 800,    # < ₹800 = High
+    "P3": 1200,   # < ₹1,200 = Medium
+    "target": 1500,
+}
+
+# Discount Rate — DISCOUNTAMT / GROSSAMT
+DISCOUNT_RATE_THRESHOLDS = {
+    "P1": 0.20,   # > 20% = Critical (margin risk)
+    "P2": 0.15,   # > 15% = High
+    "P3": 0.10,   # > 10% = Medium
+    "target": 0.08,
+}
+
+# Non-Promo Discount % — (DISCOUNTAMT - PROMOAMT) / GROSSAMT
+NON_PROMO_DISC_THRESHOLDS = {
+    "P1": 0.10,   # > 10% non-promo = Critical (unauthorized)
+    "P2": 0.07,   # > 7% = High
+    "P3": 0.05,   # > 5% = Medium
+    "target": 0.03,
+}
+
+# Gross Margin % — (NETAMT - cost_price_total) / NETAMT
+GROSS_MARGIN_THRESHOLDS = {
+    "P1": 0.20,   # < 20% = Critical
+    "P2": 0.30,   # < 30% = High
+    "P3": 0.40,   # < 40% = Medium
+    "target": 0.50,
+}
+
+# Mobile Penetration % — unique mobile_no / bill_count
+MOBILE_PENETRATION_THRESHOLDS = {
+    "P1": 0.30,   # < 30% = Critical (poor loyalty capture)
+    "P2": 0.50,   # < 50% = High
+    "P3": 0.70,   # < 70% = Medium
+    "target": 0.85,
+}
+
+# Bill Integrity — NETAMT / (GROSSAMT - DISCOUNTAMT)
+BILL_INTEGRITY_THRESHOLDS = {
+    "P1": 0.85,   # < 85% = Critical (pilferage / manipulation risk)
+    "P2": 0.90,   # < 90% = High
+    "P3": 0.95,   # < 95% = Medium
+    "target": 1.00,
+}
+
 # ─── KPI FORMULA STRINGS (injected into prompts) ─────────────────────────────
 KPI_FORMULAS = {
     "SPSF": (

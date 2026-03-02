@@ -22,6 +22,12 @@ ABBREVIATIONS: dict[str, str] = {
     "lw":  "last week",
     "lm":  "last month",
     "ly":  "last year",
+    "ltl":  "like for like financial year",
+    "fytd": "financial year to date",
+    "ftd":  "financial year to date",
+    "qtd":  "quarter to date",
+    "aod":  "as on date",
+    "asod": "as on date",
     "lfl": "like for like",
     "yoy": "year on year",
     "mom": "month on month",
@@ -281,6 +287,23 @@ PEAK_HOURS_KEYWORDS = {
     "busiest hour", "busiest time",
 }
 
+PRODUCT_ALIGNMENT_KEYWORDS = {
+    "product alignment", "item alignment", "item master", "product master",
+    "product hierarchy", "product catalog", "product catalogue",
+    "sku master", "article master", "option code", "icode alignment",
+    "cost price", "mrp alignment", "item description", "division section department",
+    "article option", "cost mrp",
+}
+
+DATE_PERIOD_KEYWORDS = {
+    "year to date", "financial year to date", "fytd", "ytd", "fy to date",
+    "since april", "from april", "month to date", "mtd", "this month",
+    "week to date", "wtd", "this week", "quarter to date", "qtd",
+    "like for like financial year", "ltl", "prior fy", "previous fy",
+    "same period last fy", "compare fy", "as on date", "till date",
+    "week no", "week number",
+}
+
 # ─── Zone Mapping ──────────────────────────────────────────────────────────────
 # DB ZONE column values (exact, case-sensitive): 'UP East', 'North', 'East/JHK', 'South', 'Bihar'
 # Longest entries first so we always match the most specific phrase first.
@@ -426,6 +449,9 @@ def normalize_query(raw: str) -> dict:
             "normalized":   cleaned, expanded query for pipeline,
             "corrections":  list of (original_token, corrected_token) tuples,
             "target_date":  'YYYY-MM-DD' if user named a specific date, else '',
+            "zone_filter":  {'zone': str, 'sql': str} or {},
+            "date_period":  {'period': 'YTD'|'MTD'|'WTD'|'QTD'|'LTL'|'WEEK_NO'|'TILL_DATE'|None,
+                             'week_no': int|None},
             "flags": {
                 "has_pilferage":  bool,
                 "has_returns":    bool,
@@ -469,11 +495,12 @@ def normalize_query(raw: str) -> dict:
     # ── 4. Detect semantic flags ───────────────────────────────────────────
     text_lower = text.lower()
     flags = {
-        "has_pilferage":   any(k in text_lower for k in LOSS_PILFERAGE_KEYWORDS),
-        "has_returns":     any(k in text_lower for k in RETURN_KEYWORDS),
-        "has_discount":    any(k in text_lower for k in DISCOUNT_KEYWORDS),
-        "has_loss":        any(k in text_lower for k in {"loss", "shrinkage", "leakage", "wastage"}),
-        "has_peak_hours":  any(k in text_lower for k in PEAK_HOURS_KEYWORDS),
+        "has_pilferage":         any(k in text_lower for k in LOSS_PILFERAGE_KEYWORDS),
+        "has_returns":           any(k in text_lower for k in RETURN_KEYWORDS),
+        "has_discount":          any(k in text_lower for k in DISCOUNT_KEYWORDS),
+        "has_loss":              any(k in text_lower for k in {"loss", "shrinkage", "leakage", "wastage"}),
+        "has_peak_hours":        any(k in text_lower for k in PEAK_HOURS_KEYWORDS),
+        "has_product_alignment": any(k in text_lower for k in PRODUCT_ALIGNMENT_KEYWORDS),
     }
 
     # ── 5. Extract specific target date (highest priority for SQL generation) ─
@@ -482,6 +509,10 @@ def normalize_query(raw: str) -> dict:
     # ── 6. Extract zone filter ────────────────────────────────────────────────
     # Check normalized text first, then original (handles abbreviation-expanded forms)
     zone_filter = extract_zone(text) or extract_zone(raw)
+
+    # ── 7. Detect FY date period ─────────────────────────────────────────────
+    from pipeline.date_engine import detect_date_period as _detect_period
+    date_period_info = _detect_period(text)
 
     if corrections:
         logger.info(f"Query normalized: '{raw}' → '{text}' | fixes={len(corrections)}")
@@ -496,6 +527,7 @@ def normalize_query(raw: str) -> dict:
         "corrections": corrections,
         "target_date": target_date,
         "zone_filter": zone_filter,
+        "date_period": date_period_info,   # {'period': 'YTD'|..., 'week_no': int|None}
         "flags":       flags,
     }
 

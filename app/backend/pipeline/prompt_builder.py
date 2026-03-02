@@ -8,6 +8,7 @@ import logging
 
 from config import RIECT_SYSTEM_PROMPT
 from pipeline.context_builder import format_history_for_prompt
+from pipeline.kpi_alignment import KPI_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,94 @@ MAX_DATA_ROWS_IN_PROMPT = 150
 ANALYTICAL_SYSTEM_ADDENDUM = """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ENTERPRISE RESPONSE PROTOCOL — FOLLOW WITHOUT DEVIATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 0 — FINANCIAL YEAR DATE CONTEXT (MANDATORY IN EVERY ANALYTICAL RESPONSE):
+  Indian FY = April 1 – March 31 (FY2025-26 = Apr 1 2025 – Mar 31 2026)
+  NEVER use Jan 1 for YTD. Always start YTD from Apr 1 of the current FY.
+
+  PERIOD LABELS — Use exactly these formats:
+    YTD    → "YTD FY2025-26: Apr 1 2025 – Feb 28 2026 (334 days)"
+    MTD    → "MTD Feb 2026: Feb 1–28 2026 (28 days)"
+    WTD    → "WTD: Feb 23–28 2026 (6 days)"
+    Week N → "Week 47 FY2025-26: Feb 23–Mar 1 2026"
+    LTL    → "LTL: Feb 2026 (FY2025-26) vs Feb 2025 (FY2024-25)"
+    AOD    → "As on Date: Feb 28 2026"
+
+  RESPONSE HEADER (line 1 of every KPI/data response):
+    Financial Year: [fy_label]
+    Period: [per format above]
+    Data as of: [latest_sales_date]
+
+  LTL RESPONSE RULE:
+    Show two parallel columns: Current FY | Prior FY | Growth %
+    Growth% = round((current - prior) / prior * 100, 1)
+    For stores where prior = 0: show "New Store" in Growth% column
+
+  DOI DAYS ELAPSED RULE (CRITICAL):
+    MTD DOI: divide by days_elapsed_mtd (e.g. 28 for Feb)
+    WTD DOI: divide by days_elapsed_wtd (e.g. 6 for Mon–Sat)
+    YTD DOI: divide by days_elapsed_fy (e.g. 334 for FY26 YTD to Feb 28)
+    NEVER use date.day for WTD or YTD — gives wrong DOI.
+
+SECTION 1 — RETAIL KPI HIERARCHY (ACTIVE ONLY WHEN COLUMNS PRESENT IN DATA):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1A. SALES & REVENUE (Always present when net sales data returned)
+    - Net Sales, Revenue, Gross Sales — report with period label (YTD/MTD/WTD)
+    - Chain Total and per-store breakdown if STORE_ID present
+    - NETAMT = net collected after all discounts (not gross/MRP)
+
+1B. BILLING & BASKET KPI (Active when bill_count + sales columns present)
+    - ATV = Net Sales / Bill Count → target ₹1,500 | P1 < ₹500 | P2 < ₹800 | P3 < ₹1,200
+    - UPT = Total Qty / Bill Count → target 2.5 | P1 < 1.2 | P2 < 1.5 | P3 < 2.0
+    - Report: Mean ATV ₹X | Mean UPT X.X | P1 stores: N
+    - Show top 5 underperformers with store name, ATV, UPT, priority
+    - SKIP THIS SECTION if bill_count column is absent from the data
+
+1C. MARGIN & PROFITABILITY KPI (Active when DISCOUNTAMT + GROSSAMT present)
+    - Discount Rate = DISCOUNTAMT / GROSSAMT → target 8% | P1 > 20% | P2 > 15% | P3 > 10%
+    - Non-Promo Disc = (DISCOUNTAMT - PROMOAMT) / GROSSAMT → P1 > 10% (unauthorized)
+    - Gross Margin % = (NETAMT - COGS) / NETAMT → requires cost_price column (vitem_data.RATE)
+    - ONLY show Gross Margin if cost_price/cogs column present in data
+    - SKIP ENTIRE SECTION if DISCOUNTAMT and GROSSAMT are absent
+
+1D. INVENTORY KPI (Active when SOH/DOI columns present)
+    - DOI (existing): Days of Inventory = (SOH + GIT) / Avg Daily Sales
+    - SOH Health: Overstock (DOI > 90d) | At-Risk (SOH < 50% MBQ) | Stockout (SOH = 0)
+    - GIT Coverage: Goods in Transit coverage days (only when git column present)
+    - Show SOH Health distribution: X overstock | Y at-risk | Z stockout stores
+    - SKIP if no SOH/inventory columns in data
+
+1E. STORE OPERATIONS KPI (Active when NETAMT + GROSSAMT + DISCOUNTAMT present)
+    - Bill Integrity = NETAMT / (GROSSAMT - DISCOUNTAMT)
+    - P1 < 85% = Critical leakage risk | P2 < 90% | P3 < 95%
+    - Flag stores with Bill Integrity < 90% as potential pilferage/manipulation risk
+    - SKIP if GROSSAMT or DISCOUNTAMT absent
+
+1F. CUSTOMER KPI (Active when mobile_no/cust_id/unique_customers column present)
+    - Unique Customers: count distinct mobile_no per store (or use unique_customers column if pre-aggregated)
+    - Mobile Penetration % = unique_customers / bill_count → target 85%
+    - P1 < 30% = Critical (poor loyalty capture) | P2 < 50% | P3 < 70%
+    - SKIP if no customer/mobile column in data
+
+1G. PROCUREMENT & SUPPLY CHAIN KPI (Active when MBQ + SOH columns present)
+    - MBQ Shortfall Qty = max(0, MBQ - SOH) per SKU/store
+    - MBQ Shortfall Amount = Shortfall Qty × cost_price (only if cost_price present)
+    - Highlight top 10 SKUs/stores by MBQ shortfall for IST/procurement action
+    - SKIP if MBQ column absent
+
+1H. PLANNING & ALLOCATION KPI (Active ONLY when aop_target/plan_sales column present)
+    - AOP vs Actual % = (Actual - Plan) / Plan × 100
+    - Over-plan: positive % (good) | Under-plan: negative % (P1 < -20%, P2 < -10%)
+    - If aop_target column NOT in data: DO NOT mention AOP at all — not even "N/A"
+
+MANDATORY AVAILABILITY RULE (NEVER VIOLATE):
+  - If a section's required columns are NOT in the KPI AVAILABILITY MAP: SKIP that section entirely
+  - NEVER fabricate values or assume columns exist that are not returned
+  - The KPI availability map in context tells you exactly which KPIs are computable
+  - Only show "N/A — data not available" if user explicitly asked for that specific KPI
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 UNIVERSAL COMPLETENESS MANDATE (applies to ALL responses):
@@ -124,6 +213,16 @@ COLUMN MAPPINGS for dept/article data blocks (use these — they exist in the da
 → SOH = total_soh column | DOI = doi column | ST% = sell_thru_pct column | MRP = avg_mrp column
 → ALL these columns are pre-computed — NEVER show N/A for any of them
 → Per-article clearance action for bottom 3: "[Article] — SOH=[X] units, DOI=[Y]d, ST%=[Z]% → [IST/MARKDOWN/PROMO]"
+
+SECTION 4.5 — PRODUCT ALIGNMENT (include when PRODUCT ALIGNMENT SUMMARY block is present in SUPPLEMENTARY DATA)
+Show hierarchy: Division → Section → Department → Article → Option Code → ICODE
+Required columns: ICODE | Article | Option Code | Cost | MRP | Margin% | ST% | DOI | SOH | Description
+- Margin% = round((MRP - Cost) / MRP * 100, 1) — COMPUTE INLINE, NEVER N/A when cost and MRP both present
+- Option Code: show as-is; if blank write "N/A (not in inventory)"
+- Cost/MRP: from vitem_data (RATE/MRP columns cast to float); if null write "N/A"
+- Item Description: from vitem_data.ITEM_NAME — use ARTICLENAME if ITEM_NAME is blank
+- NEVER skip a product row because cost or MRP is blank — show N/A for that field only
+- Margin colour guide: >60% = healthy | 40–60% = acceptable | <40% = low margin alert
 
 SECTION 5 — TOP 7 HIGHEST SELLING MRP (ALWAYS include — data is in SUPPLEMENTARY DATA block)
 | # | Article | Division | Section | Department | Pattern | Size | Colour | MRP | Net Sales | Qty | ST% | DOI | SOH |
@@ -364,6 +463,115 @@ DISPLAY RULES:
 """
 
 
+def _build_product_alignment_summary(data: list, columns: list) -> str:
+    """
+    Build a structured PRODUCT ALIGNMENT SUMMARY block for the LLM prompt.
+    Shows hierarchy tree + alignment coverage stats + top ICODEs table.
+    """
+    if not data:
+        return ""
+    try:
+        # ── Coverage stats ────────────────────────────────────────────────────
+        total = len(data)
+        divs  = len({r.get("division", "") for r in data if r.get("division")})
+        secs  = len({(r.get("division",""), r.get("section","")) for r in data if r.get("section")})
+        depts = len({(r.get("division",""), r.get("section",""), r.get("department","")) for r in data if r.get("department")})
+
+        opt_aligned  = sum(1 for r in data if r.get("option_code") and str(r.get("option_code")).strip())
+        cost_aligned = sum(1 for r in data if r.get("cost_price") is not None and r.get("cost_price") != "")
+        mrp_aligned  = sum(1 for r in data if r.get("mrp") is not None and r.get("mrp") != "")
+
+        def pct(n, d): return f"{round(n/d*100)}%" if d else "0%"
+
+        lines = [
+            "═══ PRODUCT ALIGNMENT SUMMARY ═══════════════════════════════════════════════",
+            f"  Total ICODEs: {total:,} | Divisions: {divs} | Sections: {secs} | Departments: {depts}",
+            f"  Option Codes aligned: {opt_aligned:,} / {total:,} ({pct(opt_aligned, total)})",
+            f"  Cost aligned: {cost_aligned:,} / {total:,} ({pct(cost_aligned, total)})"
+            f" | MRP aligned: {mrp_aligned:,} / {total:,} ({pct(mrp_aligned, total)})",
+            "",
+        ]
+
+        # ── Division breakdown ────────────────────────────────────────────────
+        div_counts: dict = {}
+        div_secs: dict   = {}
+        div_depts: dict  = {}
+        for r in data:
+            dv = r.get("division", "") or ""
+            sc = r.get("section", "") or ""
+            dp = r.get("department", "") or ""
+            if not dv:
+                continue
+            div_counts[dv] = div_counts.get(dv, 0) + 1
+            div_secs.setdefault(dv, set()).add(sc)
+            div_depts.setdefault(dv, set()).add(dp)
+
+        lines.append("  Division Breakdown:")
+        for dv, cnt in sorted(div_counts.items(), key=lambda x: -x[1]):
+            lines.append(
+                f"    {dv:<20} → {len(div_secs.get(dv,set())):>3} sections"
+                f" → {len(div_depts.get(dv,set())):>3} depts"
+                f" → {cnt:>6,} ICODEs"
+            )
+
+        lines.append("")
+        lines.append(
+            "  Top ICODEs by MTD Sales — Columns: ICODE | Article | Option Code | Cost | MRP"
+            " | Margin% | ST% | SOH | Division | Dept | Description"
+        )
+        lines.append("  " + "-" * 100)
+
+        # ── Top rows table ────────────────────────────────────────────────────
+        # Sort by mtd_sales if available, else just show first rows
+        def _float(v):
+            try: return float(v or 0)
+            except: return 0.0
+
+        sorted_data = sorted(data, key=lambda r: -_float(r.get("mtd_sales", 0)))
+        display = sorted_data[:20]  # Top 20 ICODEs
+
+        for r in display:
+            icode   = r.get("icode") or r.get("ICODE", "")
+            art     = (r.get("article_name", "") or "")[:30]
+            opt     = r.get("option_code", "") or "N/A"
+            cost    = r.get("cost_price")
+            mrp_v   = r.get("mrp")
+            cost_s  = f"₹{_float(cost):,.0f}" if cost is not None else "N/A"
+            mrp_s   = f"₹{_float(mrp_v):,.0f}" if mrp_v is not None else "N/A"
+            try:
+                margin = round((_float(mrp_v) - _float(cost)) / _float(mrp_v) * 100, 1) if _float(mrp_v) > 0 else None
+                margin_s = f"{margin}%" if margin is not None else "N/A"
+            except Exception:
+                margin_s = "N/A"
+            st_pct  = r.get("sell_thru_pct", "")
+            soh     = r.get("current_soh", r.get("total_soh", ""))
+            div_s   = (r.get("division", "") or "")[:15]
+            dept_s  = (r.get("department", "") or "")[:20]
+            desc    = (r.get("item_description", "") or "")[:35]
+            lines.append(
+                f"  {icode:<12} | {art:<30} | {str(opt):<12} | {cost_s:>10}"
+                f" | {mrp_s:>10} | {margin_s:>7} | {str(st_pct):>5}% | {str(soh):>7}"
+                f" | {div_s:<15} | {dept_s:<20} | {desc}"
+            )
+
+        lines.append("═" * 75)
+        lines.append(
+            "  ▶ USE THIS BLOCK for SECTION 4.5 PRODUCT ALIGNMENT. "
+            "Compute Margin% = (MRP-Cost)/MRP*100. NEVER show N/A if cost or MRP present."
+        )
+        lines.append(
+            "  ▶ option_code from inventory_current. cost_price = RATE from vitem_data (cast to float)."
+        )
+        lines.append(
+            "  ▶ item_description = vitem_data.ITEM_NAME (falls back to ARTICLENAME if blank)."
+        )
+        lines.append("═" * 75)
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"_build_product_alignment_summary failed: {e}")
+        return ""
+
+
 def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str = "") -> str:
     """
     Format pre-fetched supplementary query results into labelled data blocks.
@@ -539,6 +747,13 @@ def _format_supplementary_data(supplementary_data: dict, latest_sales_date: str 
         )
         sections.append("═" * 75)
 
+    # ── Product Alignment ────────────────────────────────────────────────────
+    pa = supplementary_data.get("product_alignment", {})
+    if pa.get("data") and pa.get("columns"):
+        pa_summary = _build_product_alignment_summary(pa["data"], pa["columns"])
+        if pa_summary:
+            sections.append(pa_summary)
+
     # ── Last 30 Days Daily Trend ─────────────────────────────────────────────
     last30 = supplementary_data.get("last_30_days", {})
     if last30.get("data") and last30.get("columns"):
@@ -655,6 +870,33 @@ def _merge_store_inventory(query_result: dict, supplementary_data: dict) -> dict
     return result
 
 
+def _format_date_period_header(context: dict) -> str:
+    """Compact FY period label for the prompt header."""
+    period  = context.get("date_period", "MTD")
+    fy_lbl  = context.get("fy_label", "")
+    latest  = context.get("latest_sales_date", "")
+
+    if period == "YTD":
+        return (f"Period: YTD {fy_lbl} ({context.get('fy_start','')} → {latest}) "
+                f"| FY Week {context.get('fy_week_no','')} | Days: {context.get('days_elapsed_fy','')}")
+    elif period == "MTD":
+        return (f"Period: MTD ({context.get('mtd_start','')} → {latest}) "
+                f"| Days: {context.get('days_elapsed_mtd','')}")
+    elif period == "WTD":
+        return (f"Period: WTD ({context.get('wtd_start','')} → {latest}) "
+                f"| Days: {context.get('days_elapsed_wtd','')}")
+    elif period == "WEEK_NO":
+        return f"Period: {context.get('week_label','Week')} ({context.get('week_start','')}→{context.get('week_end','')})"
+    elif period == "LTL":
+        return (f"Period: LTL — {context.get('ltl_current_label','Current')} "
+                f"vs {context.get('ltl_prior_label','Prior')}")
+    elif period == "QTD":
+        return f"Period: QTD {fy_lbl} | FY Week {context.get('fy_week_no','')}"
+    elif period == "TILL_DATE":
+        return f"Period: As on Date — {context.get('target_date', latest)}"
+    return f"Period: {latest} | FY: {fy_lbl}"
+
+
 def build_analysis_prompt(
     query: str,
     context: dict,
@@ -687,10 +929,19 @@ def build_analysis_prompt(
     # Format anomaly section
     anomaly_text = _format_anomalies(kpi_results)
 
-    # Data freshness line
+    # Build KPI availability + summary block
+    kpi_sections_text = _build_kpi_sections(kpi_results) if kpi_results else ""
+
+    # Data freshness line — enriched with FY period context
     freshness = ""
     if latest_sales_date:
-        freshness = f"Data date: sales up to {latest_sales_date}, inventory: vmart_product.inventory_current (always current)"
+        period_header = _format_date_period_header(context)
+        fy_lbl = context.get("fy_label", "")
+        freshness = (
+            f"Financial Year: {fy_lbl}\n"
+            f"{period_header}\n"
+            f"Data as of: {latest_sales_date}"
+        )
 
     # Build system prompt
     system = RIECT_SYSTEM_PROMPT + ANALYTICAL_SYSTEM_ADDENDUM
@@ -718,6 +969,10 @@ def build_analysis_prompt(
     supp_section = _format_supplementary_data(supplementary_data, latest_sales_date)
     if supp_section:
         parts.append(f"SUPPLEMENTARY DATA (use for Sections 4, 5, 7):\n{supp_section}")
+        parts.append("")
+
+    if kpi_sections_text:
+        parts.append(f"KPI AVAILABILITY MAP:\n{kpi_sections_text}")
         parts.append("")
 
     if anomaly_text:
@@ -813,6 +1068,79 @@ def _format_anomalies(kpi_results: dict) -> str:
         return format_anomalies_for_prompt(anomaly_result)
     except Exception:
         return ""
+
+
+def _build_kpi_sections(kpi_results: dict) -> str:
+    """
+    Build a KPI AVAILABILITY + SUMMARY block for the LLM prompt.
+    Only includes KPIs that are actually available (available=True) in the current result.
+    Groups by category. Provides mean/target/P1-count per KPI for LLM guidance.
+    """
+    if not kpi_results:
+        return ""
+
+    availability = kpi_results.get("kpi_availability", {})
+    if not availability:
+        return ""
+
+    # Category → list of (kpi_key, summary_dict) for available KPIs
+    category_map: dict = {}
+    for kpi_key, avail in availability.items():
+        if not avail:
+            continue
+        meta = KPI_REGISTRY.get(kpi_key, {})
+        category = meta.get("category", "Other")
+        label    = meta.get("label", kpi_key.upper())
+
+        # Grab summary from kpi_results — map kpi_key to result key
+        result_key = kpi_key
+        if kpi_key == "mobile_penetration":
+            result_key = "mobile_pct"
+        engine_res = kpi_results.get(result_key, {})
+        summary    = engine_res.get("summary", {}) if isinstance(engine_res, dict) else {}
+
+        category_map.setdefault(category, []).append((label, kpi_key, summary))
+
+    if not category_map:
+        return ""
+
+    lines = [
+        "═══ KPI AVAILABILITY MAP ═══════════════════════════════════════════════════",
+        "  (Only KPIs listed below are computable from the current SQL result.)",
+        "  Sections NOT listed here = required columns absent → SKIP those sections entirely.",
+        "",
+    ]
+
+    for category in sorted(category_map.keys()):
+        items = category_map[category]
+        lines.append(f"  ▶ {category}")
+        for label, kpi_key, summary in items:
+            if summary:
+                # Build a compact summary line from whatever keys the engine returned
+                summary_parts = []
+                for sk, sv in list(summary.items())[:6]:
+                    if isinstance(sv, float):
+                        summary_parts.append(f"{sk}={sv:.3g}")
+                    else:
+                        summary_parts.append(f"{sk}={sv}")
+                lines.append(f"    ✓ {label}: {' | '.join(summary_parts)}")
+            else:
+                lines.append(f"    ✓ {label}: available (no pre-computed summary)")
+
+    lines.append("")
+    # List unavailable KPIs so the LLM knows what to skip
+    unavailable = [
+        KPI_REGISTRY.get(k, {}).get("label", k.upper())
+        for k, v in availability.items()
+        if not v
+    ]
+    if unavailable:
+        lines.append(
+            f"  ✗ NOT AVAILABLE (skip): {', '.join(unavailable[:12])}"
+            + (" …" if len(unavailable) > 12 else "")
+        )
+    lines.append("═" * 75)
+    return "\n".join(lines)
 
 
 def _build_chain_totals(data: list, columns: list, latest_sales_date: str = "") -> str:

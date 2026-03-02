@@ -87,6 +87,28 @@ def init_db():
                 UNIQUE(kpi_type, dimension, dimension_value)
             );
 
+            -- Product Alignment cache (ClickHouse → SQLite for fast lookups)
+            CREATE TABLE IF NOT EXISTS product_alignment (
+                icode              TEXT PRIMARY KEY,
+                article_code       TEXT,
+                article_name       TEXT,
+                division           TEXT,
+                section            TEXT,
+                department         TEXT,
+                option_code        TEXT,
+                cost_price         REAL,
+                mrp                REAL,
+                item_description   TEXT,
+                supplier_name      TEXT,
+                style_or_pattern   TEXT,
+                size               TEXT,
+                color              TEXT,
+                cached_at          TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_pa_division   ON product_alignment(division);
+            CREATE INDEX IF NOT EXISTS idx_pa_section    ON product_alignment(section);
+            CREATE INDEX IF NOT EXISTS idx_pa_dept       ON product_alignment(department);
+
             -- RIECT alerts
             CREATE TABLE IF NOT EXISTS riect_alerts (
                 alert_id TEXT PRIMARY KEY,

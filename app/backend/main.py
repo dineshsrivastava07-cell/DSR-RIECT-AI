@@ -43,6 +43,7 @@ from llm.ollama_client import get_available_models, get_best_model
 from riect.alert_engine.alert_store import get_alert_summary
 from riect.api.alerts_api import router as alerts_router
 from riect.api.kpi_api import router as kpi_router
+from riect.api.product_api import router as product_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,6 +60,7 @@ app.add_middleware(
 )
 app.include_router(alerts_router)
 app.include_router(kpi_router)
+app.include_router(product_router)
 
 
 SQFT_CSV_PATH = "/Users/dsr-ai-lab/untitled folder/Store Detail SQR Feet Area.csv"

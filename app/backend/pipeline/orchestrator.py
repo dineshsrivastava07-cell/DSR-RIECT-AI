@@ -28,15 +28,16 @@ logger = logging.getLogger(__name__)
 # ─── Route taxonomy ───────────────────────────────────────────────────────────
 
 class Route:
-    GREETING        = "GREETING"
-    GENERAL_CHAT    = "GENERAL_CHAT"
-    ALERT_REVIEW    = "ALERT_REVIEW"
-    SCHEMA_BROWSE   = "SCHEMA_BROWSE"
-    DATA_QUERY      = "DATA_QUERY"
-    KPI_ANALYSIS    = "KPI_ANALYSIS"
-    TREND_ANALYSIS  = "TREND_ANALYSIS"
-    VENDOR_ANALYSIS = "VENDOR_ANALYSIS"
-    PEAK_HOURS      = "PEAK_HOURS"
+    GREETING          = "GREETING"
+    GENERAL_CHAT      = "GENERAL_CHAT"
+    ALERT_REVIEW      = "ALERT_REVIEW"
+    SCHEMA_BROWSE     = "SCHEMA_BROWSE"
+    DATA_QUERY        = "DATA_QUERY"
+    KPI_ANALYSIS      = "KPI_ANALYSIS"
+    TREND_ANALYSIS    = "TREND_ANALYSIS"
+    VENDOR_ANALYSIS   = "VENDOR_ANALYSIS"
+    PEAK_HOURS        = "PEAK_HOURS"
+    PRODUCT_ALIGNMENT = "PRODUCT_ALIGNMENT"
 
 
 # ─── Decision dataclass ───────────────────────────────────────────────────────
@@ -153,6 +154,14 @@ DATA_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+PRODUCT_ALIGNMENT_PATTERNS = re.compile(
+    r"\b(product alignment|item alignment|item master|product hierarchy|"
+    r"product catalog(?:ue)?|sku master|article master|"
+    r"option code|cost.*mrp|mrp.*cost|item description|"
+    r"division.*section|section.*department|article.*icode)\b",
+    re.IGNORECASE,
+)
+
 
 # ─── Orchestrator ─────────────────────────────────────────────────────────────
 
@@ -184,6 +193,15 @@ class PipelineOrchestrator:
 
         # 1. Classify route (using normalized query)
         decision = self._classify_route(query)
+        # Override route if norm flags indicate product alignment intent
+        if (decision.route not in (Route.GREETING, Route.GENERAL_CHAT, Route.SCHEMA_BROWSE)
+                and norm_flags.get("has_product_alignment")):
+            decision = PipelineDecision(
+                route=Route.PRODUCT_ALIGNMENT,
+                needs_llm=True,
+                needs_clickhouse=True, needs_schema=True,
+                needs_sql=True, needs_kpi=False,
+            )
         decision.intent = self._classify_intent(query)
         decision.normalized_query = normalized   # carry forward for execute()
 
@@ -192,6 +210,7 @@ class PipelineOrchestrator:
         decision.intent["norm_flags"]       = norm_flags
         decision.intent["target_date"]      = norm_result.get("target_date", "")
         decision.intent["zone_filter"]      = norm_result.get("zone_filter", {})
+        decision.intent["date_period"]      = norm_result.get("date_period", {"period": None, "week_no": None})
 
         # 2. Check LLM capability — honour user's preferred model first
         from llm.ollama_client import is_available as ollama_check
@@ -354,6 +373,15 @@ class PipelineOrchestrator:
                 needs_sql=True, needs_kpi=False,
             )
 
+        # PRODUCT_ALIGNMENT — product master / item identity / cost+MRP / option code
+        if PRODUCT_ALIGNMENT_PATTERNS.search(q):
+            return PipelineDecision(
+                route=Route.PRODUCT_ALIGNMENT,
+                needs_llm=True,
+                needs_clickhouse=True, needs_schema=True,
+                needs_sql=True, needs_kpi=False,
+            )
+
         # TREND_ANALYSIS — time-series / comparative queries
         if TREND_PATTERNS.search(q) and DATA_PATTERNS.search(q):
             return PipelineDecision(
@@ -475,6 +503,19 @@ class PipelineOrchestrator:
             if target_date:
                 logger.info(f"target_date={target_date} — SQL will filter on this specific date")
 
+            # ── FY Date Context ────────────────────────────────────────────────────
+            if context.get("latest_sales_date"):
+                from pipeline.date_engine import build_fy_context
+                _dp      = decision.intent.get("date_period", {})
+                _period  = _dp.get("period") if _dp else None
+                _week_no = _dp.get("week_no") if _dp else None
+                fy_ctx   = build_fy_context(context["latest_sales_date"], _period, _week_no)
+                context.update(fy_ctx)
+                logger.info(
+                    f"FY ctx: {fy_ctx.get('fy_label')} | period={fy_ctx.get('date_period')} "
+                    f"| fy_start={fy_ctx.get('fy_start')} | week={fy_ctx.get('fy_week_no')}"
+                )
+
         # ─── STAGE: sql_generate ───────────────────────────────────────
         if "sql_generate" in decision.stages and schema_dict:
             await ws_send({"type": "stage", "stage": "sql_generate"})
@@ -571,7 +612,7 @@ class PipelineOrchestrator:
         if _zone_filter:
             context["zone_filter"] = _zone_filter
 
-        _supp_routes = (Route.KPI_ANALYSIS, Route.DATA_QUERY, Route.TREND_ANALYSIS)
+        _supp_routes = (Route.KPI_ANALYSIS, Route.DATA_QUERY, Route.TREND_ANALYSIS, Route.PRODUCT_ALIGNMENT)
         if (
             decision.route in _supp_routes
             and decision.ch_available
@@ -944,6 +985,36 @@ class PipelineOrchestrator:
                     "      ON p.CUSTOMER_MOBILE = cm.CUSTOMER_MOBILE and SELECT cm.CUSTOMER_NAME."
                 )
 
+        elif decision.route == Route.PRODUCT_ALIGNMENT:
+            ctx["sql_hints"] = (
+                "PRODUCT ALIGNMENT QUERY — join pos + vitem_data + inventory_current. "
+                "SELECT p.ICODE, anyLast(p.ARTICLECODE) AS article_code, "
+                "  anyLast(p.ARTICLENAME) AS article_name, "
+                "  anyLast(p.DIVISION) AS division, anyLast(p.SECTION) AS section, "
+                "  anyLast(p.DEPARTMENT) AS department, "
+                "  anyLast(inv.OPTION_CODE) AS option_code, "
+                "  anyLast(toFloat64OrNull(v.RATE)) AS cost_price, "
+                "  anyLast(toFloat64OrNull(v.MRP)) AS mrp, "
+                "  coalesce(anyLast(v.ITEM_NAME), anyLast(p.ARTICLENAME)) AS item_description, "
+                "  anyLast(v.PARTYNAME) AS supplier_name "
+                "FROM `vmart_sales`.`pos_transactional_data` p "
+                "LEFT JOIN (SELECT ICODE, anyLast(toFloat64OrNull(RATE)) AS RATE, "
+                "  anyLast(toFloat64OrNull(MRP)) AS MRP, anyLast(ITEM_NAME) AS ITEM_NAME, "
+                "  anyLast(PARTYNAME) AS PARTYNAME FROM `vmart_product`.`vitem_data` GROUP BY ICODE) v "
+                "ON p.ICODE = v.ICODE "
+                "LEFT JOIN (SELECT ICODE, anyLast(OPTION_CODE) AS OPTION_CODE "
+                "  FROM `vmart_product`.`inventory_current` GROUP BY ICODE) inv ON p.ICODE = inv.ICODE "
+                f"WHERE toDate(p.BILLDATE) >= toStartOfMonth(toDate('{latest_sales}')) "
+                f"  AND toDate(p.BILLDATE) <= toDate('{latest_sales}') "
+                "  AND p.ICODE != '' "
+                "  AND p.DIVISION NOT IN ('NON TRADING','NON-TRADING','OTHERS','CONSUMABLES') "
+                "GROUP BY p.ICODE "
+                "ORDER BY article_name ASC LIMIT 200. "
+                "COST/MRP RULE: toFloat64OrNull(RATE) for cost, toFloat64OrNull(MRP) for MRP — always cast. "
+                "OPTION_CODE: from inventory_current (not pos). "
+                "NEVER use v.RATE or v.MRP directly — always wrap in toFloat64OrNull()."
+            )
+
         elif decision.route == Route.PEAK_HOURS:
             _zone_f   = decision.intent.get("zone_filter", {})
             _zone_sql = _zone_f.get("sql", "")    # e.g. "ZONE = 'UP East'"
@@ -992,6 +1063,34 @@ class PipelineOrchestrator:
                 "Use vmart_product.inventory_current for current stock levels (ICODE, STORE_CODE, + stock columns from Schema Context). "
                 "No vendor/PO tables exist — focus on transfer and inventory data. "
                 "NEVER use data_science.inventory_monthly_movements_opt or data_science.inv_31JAN2026."
+            )
+
+        # ── LTL override: replace sql_hints for any route when period = LTL ───
+        if ctx.get("date_period") == "LTL":
+            cs  = ctx.get("ltl_current_start", "")
+            ce  = ctx.get("ltl_current_end", "")
+            ps  = ctx.get("ltl_prior_start", "")
+            pe  = ctx.get("ltl_prior_end", "")
+            cl  = ctx.get("ltl_current_label", "Current FY")
+            pl  = ctx.get("ltl_prior_label", "Prior FY")
+            ctx["sql_hints"] = (
+                f"LTL COMPARISON — {cl} vs {pl}. "
+                "One query, two date ranges using sumIf / countDistinctIf: "
+                "SELECT STORE_ID, SHRTNAME, ZONE, REGION, "
+                f"  sumIf(NETAMT, toDate(BILLDATE) BETWEEN toDate('{cs}') AND toDate('{ce}')) AS current_fy_sales, "
+                f"  sumIf(NETAMT, toDate(BILLDATE) BETWEEN toDate('{ps}') AND toDate('{pe}')) AS prior_fy_sales, "
+                f"  countDistinctIf(BILLNO, toDate(BILLDATE) BETWEEN toDate('{cs}') AND toDate('{ce}')) AS current_bills, "
+                f"  countDistinctIf(BILLNO, toDate(BILLDATE) BETWEEN toDate('{ps}') AND toDate('{pe}')) AS prior_bills, "
+                "  round((sumIf(NETAMT, toDate(BILLDATE) BETWEEN toDate('{cs}') AND toDate('{ce}')) - "
+                "    sumIf(NETAMT, toDate(BILLDATE) BETWEEN toDate('{ps}') AND toDate('{pe}'))) / "
+                "    nullIf(sumIf(NETAMT, toDate(BILLDATE) BETWEEN toDate('{ps}') AND toDate('{pe}')),0)*100, 1) AS growth_pct "
+                "FROM vmart_sales.pos_transactional_data "
+                f"WHERE (toDate(BILLDATE) BETWEEN toDate('{cs}') AND toDate('{ce}')) "
+                f"   OR (toDate(BILLDATE) BETWEEN toDate('{ps}') AND toDate('{pe}')) "
+                "  AND STORE_ID NOT IN (SELECT CODE FROM vmart_sales.stores WHERE CLOSING_DATE IS NOT NULL) "
+                "GROUP BY STORE_ID, SHRTNAME, ZONE, REGION "
+                "ORDER BY current_fy_sales DESC LIMIT 200. "
+                "NEVER use toStartOfYear(). Use exact date strings above."
             )
 
         return ctx
@@ -1238,10 +1337,35 @@ class PipelineOrchestrator:
             return {}
 
         from datetime import datetime as _dt
-        try:
-            days_elapsed = max(_dt.strptime(date, "%Y-%m-%d").day, 1)
-        except Exception:
-            days_elapsed = 1
+
+        # FY-aware period start and days_elapsed for supplementary queries
+        date_period = context.get("date_period", "MTD")
+        if date_period == "YTD":
+            supp_start   = context.get("fy_start", "")
+            days_elapsed = max(context.get("days_elapsed_fy", 1), 1)
+        elif date_period == "WTD":
+            supp_start   = context.get("wtd_start", "")
+            days_elapsed = max(context.get("days_elapsed_wtd", 1), 1)
+        elif date_period == "QTD":
+            supp_start = context.get("qtd_start", "")
+            try:
+                d1 = _dt.strptime(date, "%Y-%m-%d")
+                d0 = _dt.strptime(supp_start, "%Y-%m-%d") if supp_start else d1.replace(day=1)
+                days_elapsed = max((d1 - d0).days + 1, 1)
+            except Exception:
+                days_elapsed = 90
+        else:  # MTD (default) or WEEK_NO / TILL_DATE / LTL
+            supp_start = ""
+            try:
+                days_elapsed = max(_dt.strptime(date, "%Y-%m-%d").day, 1)
+            except Exception:
+                days_elapsed = 1
+
+        # Build the SQL date start clause for supplementary queries
+        if supp_start:
+            supp_date_clause = f"toDate('{supp_start}')"
+        else:
+            supp_date_clause = f"toStartOfMonth(toDate('{date}'))"
 
         # Active store filter: STORE_ID = stores.CODE (confirmed join key)
         # ACTIVE='TRUE' is a String column — safe comparison. Avoids CLOSING_DATE Date type issues.
@@ -1280,7 +1404,7 @@ class PipelineOrchestrator:
                     SUM(QTY)          AS mtd_qty,
                     SUM(NETAMT)       AS mtd_sales
                 FROM `vmart_sales`.`pos_transactional_data`
-                WHERE toDate(BILLDATE) >= toStartOfMonth(toDate('{date}'))
+                WHERE toDate(BILLDATE) >= {supp_date_clause}
                   AND toDate(BILLDATE) <= toDate('{date}')
                   AND QTY > 0
                   AND {STORE_F}
@@ -1326,7 +1450,7 @@ class PipelineOrchestrator:
                     AS doi
             FROM `vmart_sales`.`pos_transactional_data` p
             LEFT JOIN {INV_SUB} inv ON p.ICODE = inv.ICODE
-            WHERE toDate(p.BILLDATE) >= toStartOfMonth(toDate('{date}'))
+            WHERE toDate(p.BILLDATE) >= {supp_date_clause}
               AND toDate(p.BILLDATE) <= toDate('{date}')
               AND p.QTY > 0
               AND {STORE_F_P}
@@ -1339,21 +1463,31 @@ class PipelineOrchestrator:
         sql_articles = f"""
             SELECT
                 p.ICODE, p.ARTICLENAME, p.DIVISION, p.SECTION, p.DEPARTMENT,
-                anyLast(p.STYLE_OR_PATTERN) AS STYLE_OR_PATTERN,
-                anyLast(p.SIZE)             AS SIZE,
-                anyLast(p.COLOR)            AS COLOR,
-                SUM(p.NETAMT)               AS net_sales_amount,
-                SUM(p.QTY)                  AS total_qty,
-                COUNT(DISTINCT p.BILLNO)    AS bill_count,
-                round(SUM(p.MRPAMT) / nullIf(SUM(p.QTY), 0), 0) AS avg_mrp,
-                SUM(ifNull(inv.SOH, 0))     AS total_soh,
+                anyLast(p.STYLE_OR_PATTERN)                         AS STYLE_OR_PATTERN,
+                anyLast(p.SIZE)                                     AS SIZE,
+                anyLast(p.COLOR)                                    AS COLOR,
+                SUM(p.NETAMT)                                       AS net_sales_amount,
+                SUM(p.QTY)                                          AS total_qty,
+                COUNT(DISTINCT p.BILLNO)                            AS bill_count,
+                round(SUM(p.MRPAMT) / nullIf(SUM(p.QTY), 0), 0)   AS avg_mrp,
+                anyLast(inv_opt.OPTION_CODE)                        AS option_code,
+                anyLast(toFloat64OrNull(v.RATE))                    AS cost_price,
+                anyLast(toFloat64OrNull(v.MRP))                     AS unit_mrp_exact,
+                coalesce(anyLast(v.ITEM_NAME), anyLast(p.ARTICLENAME)) AS item_description,
+                SUM(ifNull(inv.SOH, 0))                             AS total_soh,
                 round(SUM(p.QTY) / nullIf(SUM(p.QTY) + SUM(ifNull(inv.SOH, 0)), 0) * 100, 1)
                     AS sell_thru_pct,
                 round(SUM(ifNull(inv.SOH, 0)) / nullIf(SUM(p.QTY) / {days_elapsed}, 0), 0)
                     AS doi
             FROM `vmart_sales`.`pos_transactional_data` p
+            LEFT JOIN (SELECT ICODE, anyLast(toFloat64OrNull(RATE)) AS RATE,
+                              anyLast(toFloat64OrNull(MRP)) AS MRP,
+                              anyLast(ITEM_NAME) AS ITEM_NAME
+                       FROM `vmart_product`.`vitem_data` GROUP BY ICODE) v ON p.ICODE = v.ICODE
+            LEFT JOIN (SELECT ICODE, anyLast(OPTION_CODE) AS OPTION_CODE
+                       FROM `vmart_product`.`inventory_current` GROUP BY ICODE) inv_opt ON p.ICODE = inv_opt.ICODE
             LEFT JOIN {INV_SUB} inv ON p.ICODE = inv.ICODE
-            WHERE toDate(p.BILLDATE) >= toStartOfMonth(toDate('{date}'))
+            WHERE toDate(p.BILLDATE) >= {supp_date_clause}
               AND toDate(p.BILLDATE) <= toDate('{date}')
               AND p.QTY > 0
               AND {STORE_F_P}
@@ -1366,21 +1500,31 @@ class PipelineOrchestrator:
         sql_articles_bottom = f"""
             SELECT
                 p.ICODE, p.ARTICLENAME, p.DIVISION, p.SECTION, p.DEPARTMENT,
-                anyLast(p.STYLE_OR_PATTERN) AS STYLE_OR_PATTERN,
-                anyLast(p.SIZE)             AS SIZE,
-                anyLast(p.COLOR)            AS COLOR,
-                SUM(p.NETAMT)               AS net_sales_amount,
-                SUM(p.QTY)                  AS total_qty,
-                COUNT(DISTINCT p.BILLNO)    AS bill_count,
-                round(SUM(p.MRPAMT) / nullIf(SUM(p.QTY), 0), 0) AS avg_mrp,
-                SUM(ifNull(inv.SOH, 0))     AS total_soh,
+                anyLast(p.STYLE_OR_PATTERN)                         AS STYLE_OR_PATTERN,
+                anyLast(p.SIZE)                                     AS SIZE,
+                anyLast(p.COLOR)                                    AS COLOR,
+                SUM(p.NETAMT)                                       AS net_sales_amount,
+                SUM(p.QTY)                                          AS total_qty,
+                COUNT(DISTINCT p.BILLNO)                            AS bill_count,
+                round(SUM(p.MRPAMT) / nullIf(SUM(p.QTY), 0), 0)   AS avg_mrp,
+                anyLast(inv_opt.OPTION_CODE)                        AS option_code,
+                anyLast(toFloat64OrNull(v.RATE))                    AS cost_price,
+                anyLast(toFloat64OrNull(v.MRP))                     AS unit_mrp_exact,
+                coalesce(anyLast(v.ITEM_NAME), anyLast(p.ARTICLENAME)) AS item_description,
+                SUM(ifNull(inv.SOH, 0))                             AS total_soh,
                 round(SUM(p.QTY) / nullIf(SUM(p.QTY) + SUM(ifNull(inv.SOH, 0)), 0) * 100, 1)
                     AS sell_thru_pct,
                 round(SUM(ifNull(inv.SOH, 0)) / nullIf(SUM(p.QTY) / {days_elapsed}, 0), 0)
                     AS doi
             FROM `vmart_sales`.`pos_transactional_data` p
+            LEFT JOIN (SELECT ICODE, anyLast(toFloat64OrNull(RATE)) AS RATE,
+                              anyLast(toFloat64OrNull(MRP)) AS MRP,
+                              anyLast(ITEM_NAME) AS ITEM_NAME
+                       FROM `vmart_product`.`vitem_data` GROUP BY ICODE) v ON p.ICODE = v.ICODE
+            LEFT JOIN (SELECT ICODE, anyLast(OPTION_CODE) AS OPTION_CODE
+                       FROM `vmart_product`.`inventory_current` GROUP BY ICODE) inv_opt ON p.ICODE = inv_opt.ICODE
             LEFT JOIN {INV_SUB} inv ON p.ICODE = inv.ICODE
-            WHERE toDate(p.BILLDATE) >= toStartOfMonth(toDate('{date}'))
+            WHERE toDate(p.BILLDATE) >= {supp_date_clause}
               AND toDate(p.BILLDATE) <= toDate('{date}')
               AND p.QTY > 0
               AND {STORE_F_P}
@@ -1445,7 +1589,7 @@ class PipelineOrchestrator:
                 GROUP BY ICODE
             ) v ON p.ICODE = v.ICODE
             LEFT JOIN {INV_SUB} inv ON p.ICODE = inv.ICODE
-            WHERE toDate(p.BILLDATE) >= toStartOfMonth(toDate('{date}'))
+            WHERE toDate(p.BILLDATE) >= {supp_date_clause}
               AND toDate(p.BILLDATE) <= toDate('{date}')
               AND p.QTY > 0
               AND {STORE_F_P}
@@ -1477,6 +1621,49 @@ class PipelineOrchestrator:
                     logger.warning(f"Supp peak_hours query failed: {e2}")
                     return "peak_hours", {}
 
+        # 8th query: product_alignment — full hierarchy + cost/MRP/option for PRODUCT_ALIGNMENT route
+        sql_product_alignment = f"""
+            SELECT
+                p.ICODE,
+                anyLast(p.ARTICLECODE)                                      AS article_code,
+                anyLast(p.ARTICLENAME)                                      AS article_name,
+                anyLast(p.DIVISION)                                         AS division,
+                anyLast(p.SECTION)                                          AS section,
+                anyLast(p.DEPARTMENT)                                       AS department,
+                anyLast(inv_opt.OPTION_CODE)                                AS option_code,
+                anyLast(toFloat64OrNull(v.RATE))                            AS cost_price,
+                anyLast(toFloat64OrNull(v.MRP))                             AS mrp,
+                coalesce(anyLast(v.ITEM_NAME), anyLast(p.ARTICLENAME))      AS item_description,
+                anyLast(v.PARTYNAME)                                        AS supplier_name,
+                anyLast(p.STYLE_OR_PATTERN)                                 AS style_or_pattern,
+                anyLast(p.SIZE)                                             AS size,
+                anyLast(p.COLOR)                                            AS color,
+                SUM(p.NETAMT)                                               AS mtd_sales,
+                SUM(p.QTY)                                                  AS mtd_qty,
+                SUM(ifNull(inv_agg.SOH, 0))                                 AS current_soh,
+                round(SUM(p.QTY)/nullIf(SUM(p.QTY)+SUM(ifNull(inv_agg.SOH,0)),0)*100,1)
+                    AS sell_thru_pct,
+                round(SUM(ifNull(inv_agg.SOH,0))/nullIf(SUM(p.QTY)/{days_elapsed},0),0)
+                    AS doi
+            FROM `vmart_sales`.`pos_transactional_data` p
+            LEFT JOIN (SELECT ICODE, anyLast(toFloat64OrNull(RATE)) AS RATE,
+                              anyLast(toFloat64OrNull(MRP)) AS MRP,
+                              anyLast(ITEM_NAME) AS ITEM_NAME,
+                              anyLast(PARTYNAME) AS PARTYNAME
+                       FROM `vmart_product`.`vitem_data` GROUP BY ICODE) v ON p.ICODE = v.ICODE
+            LEFT JOIN (SELECT ICODE, anyLast(OPTION_CODE) AS OPTION_CODE
+                       FROM `vmart_product`.`inventory_current` GROUP BY ICODE) inv_opt ON p.ICODE = inv_opt.ICODE
+            LEFT JOIN {INV_SUB} inv_agg ON p.ICODE = inv_agg.ICODE
+            WHERE toDate(p.BILLDATE) >= {supp_date_clause}
+              AND toDate(p.BILLDATE) <= toDate('{date}')
+              AND p.QTY > 0
+              AND {STORE_F_P}
+              AND {TRADING_F}
+            GROUP BY p.ICODE
+            ORDER BY mtd_sales DESC
+            LIMIT 100
+        """
+
         # 7th query: last_30_days daily trend — feeds 30-Day Outlook section
         sql_last_30_days = f"""
             SELECT
@@ -1495,7 +1682,7 @@ class PipelineOrchestrator:
             ORDER BY dt ASC
         """
 
-        # Run all 7 queries in parallel
+        # Run all 8 queries in parallel
         tasks = [
             _run("store_inventory", sql_store_inventory),
             _run("dept", sql_dept),
@@ -1504,6 +1691,7 @@ class PipelineOrchestrator:
             _run_peak(),
             _run("top_mrp", sql_top_mrp),
             _run("last_30_days", sql_last_30_days),
+            _run("product_alignment", sql_product_alignment),
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 

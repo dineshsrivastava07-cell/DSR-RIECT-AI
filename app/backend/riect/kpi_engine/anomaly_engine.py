@@ -41,6 +41,18 @@ KPI_ANOMALY_COLUMNS = {
     "soh":         ("SOH", "Stock on Hand", "both"),
     "total_stock": ("SOH", "Stock on Hand", "both"),
     "as_on_stk":   ("SOH", "Stock on Hand", "both"),
+    # ATV — higher is better → only flag low outliers
+    "atv": ("ATV", "Avg Transaction Value", "low"),
+    # Discount Rate — lower is better → only flag high outliers (excessive discounting)
+    "discount_rate":    ("DISC", "Discount Rate",    "high"),
+    "gross_disc_rate":  ("DISC", "Discount Rate",    "high"),
+    # Mobile Penetration — higher is better → only flag low outliers
+    "mobile_pct":         ("MOBPCT", "Mobile Penetration %", "low"),
+    "mobile_penetration": ("MOBPCT", "Mobile Penetration %", "low"),
+    # Bill Integrity — higher is better → only flag low outliers (leakage / fraud)
+    "bill_integrity": ("BILLINT", "Bill Integrity %", "low"),
+    # Gross Margin — higher is better → only flag low outliers
+    "gross_margin_pct": ("GM", "Gross Margin %", "low"),
 }
 
 # For UPT: derive from QTY + bill count columns if upt not present
@@ -517,6 +529,11 @@ def format_anomalies_for_prompt(anomaly_result: dict) -> str:
         "PILFERAGE": {"unit": "₹",   "label": "Bill Integrity Breach","target": "100% integrity", "action": "ESCALATE to Loss Prevention. Suspend staff pending audit."},
         "DISCOUNT":  {"unit": "%",   "label": "Discount Anomaly",     "target": "≤ 5% non-promo", "action": "AUDIT: Pull all discount logs. Verify authorization chain."},
         "RETURNS":   {"unit": "₹",   "label": "Sales Return",         "target": "≤ 5% return rate", "action": "Review return policy compliance. Check for fraud or defect pattern."},
+        "ATV":       {"unit": "₹",   "label": "Avg Transaction Value", "target": "≥ ₹1,500",       "action": "Train staff on cross-sell/upsell. Review display strategy and bundling."},
+        "DISC":      {"unit": "%",   "label": "Discount Rate",          "target": "≤ 8%",           "action": "AUDIT: Pull discount logs. Verify authorization. Flag non-promo markdowns."},
+        "MOBPCT":    {"unit": "%",   "label": "Mobile Penetration %",   "target": "≥ 85%",          "action": "Train billing staff on mobile capture. Launch CRM incentive programme."},
+        "BILLINT":   {"unit": "%",   "label": "Bill Integrity %",        "target": "100%",           "action": "ESCALATE to Loss Prevention. Audit transaction logs. Suspend pending review."},
+        "GM":        {"unit": "%",   "label": "Gross Margin %",          "target": "≥ 50%",          "action": "Review cost structure. Reduce discount exposure. Shift mix to high-margin SKUs."},
     }
 
     def _fmt_value(val, kpi: str) -> str:

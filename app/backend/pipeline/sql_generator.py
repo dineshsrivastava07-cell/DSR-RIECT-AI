@@ -94,6 +94,21 @@ SPSF DATE RULE — CRITICAL:
   Single-day SPSF (~₹30-75/sqft) will ALWAYS appear P1 vs monthly threshold — WRONG.
   MTD SPSF for a good store (e.g. Feb 1-26) = ₹800-1,500/sqft → correct comparison.
 
+FINANCIAL YEAR DATE RULES (Indian FY: April 1 – March 31):
+  Current FY   : {fy_label}  ({fy_start} → {fy_end})
+  Period intent: {date_period}
+  YTD range    : {fy_start} → {latest_sales_date}   ← NEVER use toStartOfYear (= Jan 1 = WRONG)
+  MTD range    : {mtd_start} → {latest_sales_date}
+  WTD range    : {wtd_start} → {latest_sales_date}
+  QTD range    : {qtd_start} → {latest_sales_date}
+  Week start   : {week_start}  Week end: {week_end}
+  LTL current  : {ltl_current_start} → {ltl_current_end} ({ltl_current_label})
+  LTL prior    : {ltl_prior_start}   → {ltl_prior_end}   ({ltl_prior_label})
+
+  MANDATORY: When user says "YTD" → use toDate('{fy_start}'), NOT toStartOfYear().
+  MANDATORY: When user says "LTL" → use sumIf pattern with BOTH date ranges in one query.
+  MANDATORY: When user says "Week {fy_week_no}" → use toDate('{week_start}') → toDate('{week_end}').
+
 INVENTORY RULES:
   For live SOH: vmart_product.inventory_current (no date filter needed — always live snapshot)
     Key columns: ICODE (String), STORE_CODE (String = STORE_ID in sales), SOH (Int32), UPDATED_AT, _VERSION
@@ -142,7 +157,9 @@ INVENTORY RULES:
       MTD (default)  : AND toDate(p.BILLDATE) >= toStartOfMonth(toDate('{{latest_date}}')) AND toDate(p.BILLDATE) <= toDate('{{latest_date}}')
       WTD            : AND toDate(p.BILLDATE) >= toMonday(toDate('{{latest_date}}')) AND toDate(p.BILLDATE) <= toDate('{{latest_date}}')
       QTD            : AND toDate(p.BILLDATE) >= toStartOfQuarter(toDate('{{latest_date}}')) AND toDate(p.BILLDATE) <= toDate('{{latest_date}}')
-      YTD            : AND toDate(p.BILLDATE) >= toStartOfYear(toDate('{{latest_date}}')) AND toDate(p.BILLDATE) <= toDate('{{latest_date}}')
+      YTD/FYTD (FY Apr 1): AND toDate(p.BILLDATE) >= toDate('{fy_start}') AND toDate(p.BILLDATE) <= toDate('{latest_sales_date}')
+      QTD (FY quarter):     AND toDate(p.BILLDATE) >= toDate('{qtd_start}') AND toDate(p.BILLDATE) <= toDate('{latest_sales_date}')
+      Week {fy_week_no}:    AND toDate(p.BILLDATE) >= toDate('{week_start}') AND toDate(p.BILLDATE) <= toDate('{week_end}')
     DOI = icode_soh / icode_qty (single date) or icode_soh / (icode_mtd_qty / days_elapsed) (MTD+)
     Targets: ST% P1<60%, P2<80%, P3<95%, target=95% | DOI target<15d, P1>90d, P2>60d, P3>30d
 
@@ -310,10 +327,20 @@ Join Hints:
 Route Hints:
 {sql_hints}
 
-Data Freshness:
+Data Freshness & FY Context:
   User-specified date : {target_date_line}
   Latest sales date   : {latest_sales_date}
-  Inventory table     : vmart_product.inventory_current (always current — no date filter needed)
+  Financial year      : {fy_label}  ({fy_start} → {fy_end})
+  Period detected     : {date_period}
+  YTD start (Apr 1)   : {fy_start}
+  MTD start           : {mtd_start}
+  WTD start           : {wtd_start}
+  FY Week No          : {fy_week_no}
+  Days elapsed (FY)   : {days_elapsed_fy}
+  Days elapsed (MTD)  : {days_elapsed_mtd}
+  LTL current period  : {ltl_current_start} → {ltl_current_end}
+  LTL prior period    : {ltl_prior_start} → {ltl_prior_end}
+  Inventory table     : vmart_product.inventory_current (always current — no date filter)
 
 User question: {query}
 
@@ -337,11 +364,34 @@ async def generate_sql(query: str, context: dict, llm_router) -> dict:
     else:
         target_date_line = "none (use latest_sales_date)"
 
+    # Extract FY context vars (all keys have empty-string defaults to avoid KeyError)
+    FY_VARS = {
+        "fy_start":          context.get("fy_start", ""),
+        "fy_end":            context.get("fy_end", ""),
+        "fy_label":          context.get("fy_label", ""),
+        "fy_week_no":        context.get("fy_week_no", ""),
+        "date_period":       context.get("date_period", "MTD"),
+        "mtd_start":         context.get("mtd_start", ""),
+        "wtd_start":         context.get("wtd_start", ""),
+        "qtd_start":         context.get("qtd_start", ""),
+        "week_start":        context.get("week_start", ""),
+        "week_end":          context.get("week_end", ""),
+        "days_elapsed_fy":   context.get("days_elapsed_fy", ""),
+        "days_elapsed_mtd":  context.get("days_elapsed_mtd", ""),
+        "ltl_current_start": context.get("ltl_current_start", ""),
+        "ltl_current_end":   context.get("ltl_current_end", ""),
+        "ltl_prior_start":   context.get("ltl_prior_start", ""),
+        "ltl_prior_end":     context.get("ltl_prior_end", ""),
+        "ltl_current_label": context.get("ltl_current_label", ""),
+        "ltl_prior_label":   context.get("ltl_prior_label", ""),
+    }
+
     # Bake dates into the system prompt
     system = SQL_SYSTEM_PROMPT.format(
         latest_sales_date=latest_sales_date,
         target_date=target_date if target_date else "",
         latest_inv_date="N/A — use vmart_product.inventory_current (no date filter)",
+        **FY_VARS,
     )
 
     prompt = SQL_USER_TEMPLATE.format(
@@ -351,6 +401,7 @@ async def generate_sql(query: str, context: dict, llm_router) -> dict:
         latest_sales_date=latest_sales_date,
         target_date_line=target_date_line,
         query=query,
+        **FY_VARS,
     )
 
     try:
